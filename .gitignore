@@ -1,0 +1,4 @@
+core/target/
+dist/
+__pycache__/
+*.pyc

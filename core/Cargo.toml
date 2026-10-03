@@ -1,0 +1,18 @@
+[package]
+name = "gothic3-core"
+version = "0.1.0"
+edition = "2021"
+description = "Native core of the Gothic 3 ImpExp Blender add-on: reads Gothic 3 archives and formats"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+flate2 = "1"
+ddsfile = { version = "0.6.0", default-features = false }
+texpresso = { version = "2.0.2", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[profile.release]
+opt-level = 3

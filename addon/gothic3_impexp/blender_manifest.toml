@@ -1,0 +1,16 @@
+schema_version = "1.0.0"
+
+id = "gothic3_impexp"
+version = "0.1.0"
+name = "Gothic 3 ImpExp"
+tagline = "Gothic 3 models, characters, animations and collision"
+maintainer = "UniLinkIF"
+type = "add-on"
+
+blender_version_min = "5.1.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+tags = ["Import-Export"]
+
+[permissions]
+files = "Reads the Gothic 3 game archives"
