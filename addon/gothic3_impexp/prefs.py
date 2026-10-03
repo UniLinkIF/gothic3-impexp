@@ -11,7 +11,7 @@ class G3ImpExpPreferences(bpy.types.AddonPreferences):
 
     game_dir: StringProperty(
         name="Папка гри Gothic 3",
-        description="Папка з Gothic3.exe; моделі, матеріали й текстури читаються з архівів гри (Data\*.pak) напряму",
+        description="Папка з Gothic3.exe; моделі, матеріали й текстури читаються з архівів гри (Data\\*.pak) напряму",
         subtype="DIR_PATH",
         default=r"C:\Program Files (x86)\Steam\steamapps\common\Gothic 3",
     )
