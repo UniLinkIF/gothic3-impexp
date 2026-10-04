@@ -12,6 +12,8 @@
 //! gothic3-core clips <game> <actor> [words] [limit]         clips that fit the actor
 //! gothic3-core export <game> <spec.json> install <mod> | package <folder> <title>
 //!                                                           a model from Blender into the game or a mod package
+//! gothic3-core export-motion <game> <clip> <glb> install <mod> | package <folder> <title>
+//!                                                           a game clip replaced by the animation in the glb
 //! gothic3-core installed <game>                             mods installed from Blender
 //! gothic3-core uninstall <game> <mod>                       remove one
 //! ```
@@ -25,6 +27,7 @@ mod g3_motion;
 mod g3_res;
 mod g3_write;
 mod mods;
+mod motion_write;
 mod nxs;
 mod geom;
 mod glb;
@@ -36,6 +39,7 @@ mod xcmsh_write;
 use anyhow::{bail, Context, Result};
 use std::path::Path;
 
+pub fn stem_of(key: &str) -> String { stem(key) }
 fn stem(key: &str) -> String { key.rsplit('/').next().unwrap_or(key).rsplit_once('.').map(|x| x.0).unwrap_or(key).to_string() }
 fn folder(key: &str) -> String { let p: Vec<&str> = key.split('/').collect(); if p.len() > 2 { p[1..p.len() - 1].join("/") } else { String::new() } }
 
@@ -137,6 +141,17 @@ fn run(args: &[String]) -> Result<serde_json::Value> {
         (Some("export"), Some(game)) => {
             let g = open(game)?;
             export::run(&g, Path::new(game), a(3).context("spec.json")?, a(4).unwrap_or("install"), a(5).context("mod name or package folder")?, a(6).unwrap_or(""))?
+        }
+        (Some("export-motion"), Some(game)) => {
+            let g = open(game)?;
+            let (report, file) = motion_write::build(&g, a(3).context("clip")?, &std::fs::read(a(4).context("glb")?)?)?;
+            let mut out = serde_json::json!({ "report": report });
+            match a(5).unwrap_or("install") {
+                "install" => { out["volumes"] = serde_json::json!(mods::install(Path::new(game), a(6).context("mod name")?, &[file])?); }
+                "package" => { mods::package(Path::new(a(6).context("package folder")?), a(7).unwrap_or(""), &[file])?; }
+                m => bail!("mode {m}: install or package"),
+            }
+            out
         }
         (Some("installed"), Some(game)) => serde_json::to_value(mods::installed(Path::new(game)))?,
         (Some("uninstall"), Some(game)) => { mods::uninstall(Path::new(game), a(3).context("mod name")?)?; serde_json::json!(true) }

@@ -60,6 +60,7 @@ class G3_PT_main(bpy.types.Panel):
         col.operator("gothic3.import_collision", icon="MOD_PHYSICS")
         col.separator()
         col.operator("gothic3.export_mesh", icon="EXPORT")
+        col.operator("gothic3.export_motion", icon="ACTION")
         from . import rig
         rig.draw_panel(self.layout, context)
         box = self.layout.box()

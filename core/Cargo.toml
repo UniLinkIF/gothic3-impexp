@@ -13,6 +13,7 @@ flate2 = "1"
 ddsfile = { version = "0.6.0", default-features = false }
 texpresso = { version = "2.0.2", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png"] }
+gltf = { version = "1", default-features = false, features = ["utils", "names"] }
 
 [profile.release]
 opt-level = 3
