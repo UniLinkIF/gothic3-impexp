@@ -1,17 +1,18 @@
-"""Gothic 3 ImpExp: Blender import for Gothic 3 (Piranha Bytes, Genome engine).
+"""Gothic 3 ImpExp: Blender import and export for Gothic 3 (Piranha Bytes, Genome engine).
 
 Blender side only: UI, preferences, menu entries and the hand-over to the native core (``gothic3-core``, Rust;
 reads the game's .pak archives and patch volumes directly), which converts through OBJ and glTF so Blender's own
-importers do the mesh, skeleton and animation work.
+importers and exporters do the mesh, skeleton and animation work; it writes Gothic 3 files and installs
+them as patch volumes over the game's archives.
 """
 
 bl_info = {
     "name": "Gothic 3 ImpExp",
     "author": "UniLinkIF",
-    "version": (0, 1, 0),
+    "version": (0, 9, 0),
     "blender": (5, 1, 0),
-    "location": "File > Import > Gothic 3",
-    "description": "Import Gothic 3 models, characters, animations and collision",
+    "location": "File > Import / Export > Gothic 3",
+    "description": "Import and export Gothic 3 models, characters, animations and collision",
     "category": "Import-Export",
 }
 

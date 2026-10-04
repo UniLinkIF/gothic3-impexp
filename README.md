@@ -2,11 +2,12 @@
 
 **English** · [Українська](README.uk.md)
 
-Import **Gothic 3** (Piranha Bytes, 2006, Genome engine) models, characters, animations and collision into
-**Blender 5.1+**, straight from the game's archives.
+Import and export **Gothic 3** (Piranha Bytes, 2006, Genome engine) models, characters, animations and collision in
+**Blender 5.1+**, straight from and back into the game's archives.
 
-> **Status: 0.1, import only.** Writing back into Gothic 3 (models, characters, animations, mod volumes) is the
-> next stage.
+> **Status: 0.9 beta.** Everything the add-on writes is checked against the game's own files and read back through
+> the game's archive lookup, but it has not yet been played through in the game. Keep your game backed up and report
+> what you find.
 
 ## What it does
 
@@ -19,6 +20,18 @@ Import **Gothic 3** (Piranha Bytes, 2006, Genome engine) models, characters, ani
 | Gothic 3 Animations | `.xmot` | animations onto the selected Gothic 3 skeleton: one clip or a whole category — idle, movement, attacks, defence, dialogue and gestures, sitting and lying, interaction, death |
 | Gothic 3 Collision | `.xnvmsh` | only the collision, as a wireframe mesh |
 
+**File → Export** (install into the game, or build a mod package with `INSTALL.bat` / `ROLLBACK.bat`):
+
+| Entry | Writes |
+|---|---|
+| Gothic 3 Model → Mod | `.xcmsh` replacing the game's mesh of the same name or a new one, new materials (`.xshmat` from game templates: opaque, specular, alpha test) and images (`.ximg`), collision (`.xnvmsh`, from the `*_COL` objects or the model itself) |
+| Gothic 3 Motion → Mod | a `.xmot` replacing one of the game's clips (by default the one the action came from); IK and other constraints go in as their result |
+| Gothic 3 Actor → Mod | a `.xact` — your mesh on a game skeleton (armour, bodies, heads, creatures with one mesh), weights from vertex groups |
+
+Mods go into the game as a patch volume per archive (`Data\_compiledMesh.pNN` and so on, after the game's own), the way
+the game's patches do; the archives themselves are never changed. The **Gothic 3** tab lists the mods installed from
+Blender with a button to remove each.
+
 The **Gothic 3** tab in the 3D view sidebar has all of these and, with a Gothic 3 armature selected, an
 **animation rig**: bone colours and collections, shapes to grab, and IK for arms and legs (a target and a pole per
 limb). The rig only adds bones that deform nothing; IK starts off, and switching a limb on snaps it to the current
@@ -27,12 +40,29 @@ pose.
 ## Install
 
 1. Blender 5.1 or newer.
-2. *Edit → Preferences → Get Extensions → ⌄ → Install from Disk…* → `gothic3_impexp-0.1.0.zip`.
+2. *Edit → Preferences → Get Extensions → ⌄ → Install from Disk…* → `gothic3_impexp-0.9.0.zip`.
 3. In the add-on's preferences check **Gothic 3 game folder** (the one with `Gothic3.exe`; the Steam default is
    filled in).
 
-The zip carries `gothic3-core.exe`, the native part (Windows x64). Nothing else is needed. The add-on only reads
-the game; it never writes into the game folder.
+The zip carries `gothic3-core.exe`, the native part (Windows x64). Nothing else is needed — no PhysX SDK, no tools.
+Installed mods live in `Gothic 3\gothic3_impexp\` (their files and a list) plus one patch volume per archive in `Data`.
+
+## Quick start
+
+- **Replace a prop:** Import → Gothic 3 Model → `G3_Object_Barrel_02`. Edit it, keep the origin. Export → Gothic 3
+  Model → Mod, same name, *Install*. Start the game.
+- **New armour:** Import → Gothic 3 Character → `G3_Hero_Body_Player`. Change the body mesh (keep it skinned), select
+  only it, Export → Gothic 3 Actor, same name. The head is its own actor: select it alone to export it.
+- **Change an animation:** Import → Gothic 3 Character → the creature, select the armature, Import → Gothic 3
+  Animations. Edit the action (the animation rig helps), Export → Gothic 3 Motion: the clip it came from is preselected.
+
+## Limits (0.9)
+
+- Meshes are written in the plain form (version-1 elements: positions, normals, one uv set, tangents); the extra arrays
+  of the game's own meshes (lightmap uvs, vertex colours) are not written.
+- Collision streams follow the game's layout; the per-edge contact flags are computed by Risen's rule, not Gothic 3's.
+- Motions can only replace a clip the game has; actors only replace (or sit beside) a one-mesh actor of the game.
+- A new model or actor shows up in the game only once something places or references it.
 
 ## Notes
 
