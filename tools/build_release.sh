@@ -9,7 +9,7 @@ BLENDER="${BLENDER:-blender}"
 rm -rf dist/stage && mkdir -p dist/stage/bin
 cp addon/gothic3_impexp/*.py addon/gothic3_impexp/blender_manifest.toml dist/stage/
 cp core/target/release/gothic3-core.exe dist/stage/bin/
-cp LICENSE dist/stage/
+cp LICENSE NOTICE dist/stage/
 "$BLENDER" --background --factory-startup --command extension build --source-dir dist/stage --output-dir dist
 rm -rf dist/stage
 ls -l dist/*.zip

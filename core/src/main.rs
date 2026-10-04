@@ -1,4 +1,5 @@
-//! gothic3-core: the native part of the Gothic 3 ImpExp Blender add-on. One command per call, one JSON value on
+//! gothic3-core: the native part of the Gothic 3 ImpExp Blender add-on. Copyright (C) 2026 UniLinkIF,
+//! GPL-3.0-or-later with additional terms (section 7): see NOTICE. One command per call, one JSON value on
 //! stdout (errors on stderr, exit code 1).
 //!
 //! ```text
@@ -12,7 +13,9 @@
 //! gothic3-core clips <game> <actor> [words] [limit]         clips that fit the actor
 //! gothic3-core export <game> <spec.json> install <mod> | package <folder> <title>
 //!                                                           a model from Blender into the game or a mod package
-//! gothic3-core export-motion <game> <clip> <glb> install <mod> | package <folder> <title>
+//! gothic3-core export-motion <game> <spec.json> install <mod> | package <folder> <title>
+//!                                                           the animation of a glb on a game clip (replacing it or as a
+//!                                                           new clip), with its frame effects| package <folder> <title>
 //!                                                           a game clip replaced by the animation in the glb
 //! gothic3-core export-actor <game> <spec.json> install <mod> | package <folder> <title>
 //!                                                           a skinned mesh on a game actor's skeleton
@@ -130,8 +133,7 @@ fn run(args: &[String]) -> Result<serde_json::Value> {
                 }
             }
             let cache = out.parent().map(|p| p.join("textures")).unwrap_or_default();
-            let (bytes, mut s) = glb::build(&stem(g.path_of(&key).unwrap_or(&key)), &actor, &motions, &mut |t: &str, normal: bool| -> Result<Option<Vec<u8>>> {
-                if !with_textures { return Ok(None); }
+            let (bytes, mut s) = glb::build(&stem(g.path_of(&key).unwrap_or(&key)), &actor, &motions, with_textures, &mut |t: &str, normal: bool| -> Result<Option<Vec<u8>>> {
                 Ok(match textures::png(&g, t, &cache, normal)? { Some(p) => Some(std::fs::read(p)?), None => None })
             })?;
             if let Some(p) = out.parent() { std::fs::create_dir_all(p)?; }
@@ -148,11 +150,12 @@ fn run(args: &[String]) -> Result<serde_json::Value> {
         }
         (Some("export-motion"), Some(game)) => {
             let g = open(game)?;
-            let (report, file) = motion_write::build(&g, a(3).context("clip")?, &std::fs::read(a(4).context("glb")?)?)?;
+            let spec: motion_write::MotionSpec = serde_json::from_str(&std::fs::read_to_string(a(3).context("spec.json")?)?).context("motion spec")?;
+            let (report, file) = motion_write::build(&g, &spec)?;
             let mut out = serde_json::json!({ "report": report });
-            match a(5).unwrap_or("install") {
-                "install" => { out["volumes"] = serde_json::json!(mods::install(Path::new(game), a(6).context("mod name")?, &[file])?); }
-                "package" => { mods::package(Path::new(a(6).context("package folder")?), a(7).unwrap_or(""), &[file])?; }
+            match a(4).unwrap_or("install") {
+                "install" => { out["volumes"] = serde_json::json!(mods::install(Path::new(game), a(5).context("mod name")?, &[file])?); }
+                "package" => { mods::package(Path::new(a(5).context("package folder")?), a(6).unwrap_or(""), &[file])?; }
                 m => bail!("mode {m}: install or package"),
             }
             out

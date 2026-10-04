@@ -64,6 +64,8 @@ class G3_PT_main(bpy.types.Panel):
         col.operator("gothic3.export_actor", icon="OUTLINER_OB_ARMATURE")
         from . import rig
         rig.draw_panel(self.layout, context)
+        from . import effects
+        effects.draw_panel(self.layout, context)
         box = self.layout.box()
         row = box.row()
         row.label(text="Встановлені моди", icon="PACKAGE")

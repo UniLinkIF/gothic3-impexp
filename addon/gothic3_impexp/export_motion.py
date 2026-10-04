@@ -1,17 +1,20 @@
-"""File > Export > Gothic 3 Motion: the active action of a Gothic 3 armature replaces one of the game's clips.
+"""File > Export > Gothic 3 Motion: the active action of a Gothic 3 armature replaces one of the game's clips, or becomes
+a new clip next to it (the game clip is then the template).
 
 Blender's own glTF exporter samples the action (every frame, bone space); gothic3-core puts those keys into the
 game's clip (its structure stays) and installs it as a mod or builds a package. By default the clip is the one the
 action came from. IK and other constraints go in as their result, since the exporter samples the final pose.
+Frame effects (footsteps, sounds) go in from the action's own list when it has one, else the clip's stay.
 """
 
+import json
 import os
 import tempfile
 
 import bpy
 from bpy.props import EnumProperty, StringProperty
 
-from . import catalog, core
+from . import catalog, core, effects
 from .import_actor import actor_clips
 from .prefs import prefs
 
@@ -34,7 +37,8 @@ class G3_OT_export_motion(bpy.types.Operator):
     bl_description = "Активна дія скелета Gothic 3 замінює анімацію гри (за замовчуванням ту, з якої вона прийшла)"
 
     category: EnumProperty(name="Категорія", items=catalog.enum_items(catalog.CLIP_CATEGORIES))
-    clip: StringProperty(name="Анімація гри", description="Яку анімацію замінити", search=_search_clip)
+    clip: StringProperty(name="Анімація гри", description="Яку анімацію замінити (або взяти за зразок для нової)", search=_search_clip)
+    as_name: StringProperty(name="Нова назва", description="Порожньо — замінити анімацію гри; назва — нова анімація поруч (напр. Wolf_Stand_None_Fist_P0_Move_Run_N_Fwd_00_%_00_P0_401)")
     mode: EnumProperty(name="Куди", items=(
         ("install", "Встановити в гру", "Одразу в гру (том-латка); прибрати — панель Gothic 3"),
         ("package", "Пакет мода", "Папка з томом, INSTALL.bat і ROLLBACK.bat"),
@@ -56,6 +60,7 @@ class G3_OT_export_motion(bpy.types.Operator):
         col = self.layout.column()
         col.prop(self, "category")
         col.prop(self, "clip")
+        col.prop(self, "as_name")
         col.prop(self, "mode", expand=True)
         if self.mode == "package":
             col.prop(self, "folder")
@@ -84,19 +89,24 @@ class G3_OT_export_motion(bpy.types.Operator):
             arm.select_set(False)
             for o in sel:
                 o.select_set(True)
+        spec = os.path.join(tmp, "spec.json")
+        with open(spec, "w", encoding="utf-8") as f:
+            json.dump({"clip": self.clip, "glb": glb, "as_name": self.as_name or None, "effects": effects.as_times(context.scene, action)}, f)
+        target = self.as_name or self.clip
         try:
             if self.mode == "package":
-                folder = bpy.path.abspath(self.folder) if self.folder else os.path.join(prefs().mods_dir or tmp, self.clip)
-                out = core.run("export-motion", core.game_dir(), self.clip, glb, "package", folder, self.title or self.clip)
+                folder = bpy.path.abspath(self.folder) if self.folder else os.path.join(prefs().mods_dir or tmp, target)
+                out = core.run("export-motion", core.game_dir(), spec, "package", folder, self.title or target)
             else:
-                out = core.run("export-motion", core.game_dir(), self.clip, glb, "install", self.clip)
+                out = core.run("export-motion", core.game_dir(), spec, "install", target)
                 from . import ui
                 ui.refresh()
         except core.CoreError as e:
             self.report({"ERROR"}, str(e))
             return {"CANCELLED"}
         r = out["report"]
-        self.report({"INFO"}, f"{r['clip']} (замінено): {r['bones']} кісток, {r['keys']} ключів, {r['duration']:.2f} с — {action.name}")
+        what = f"нова, за зразком {r['template']}" if r["new"] else "замінено"
+        self.report({"INFO"}, f"{r['clip']} ({what}): {r['bones']} кісток, {r['keys']} ключів, {r['effects']} ефектів, {r['duration']:.2f} с — {action.name}")
         return {"FINISHED"}
 
 

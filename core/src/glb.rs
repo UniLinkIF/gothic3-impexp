@@ -101,9 +101,10 @@ fn rising<T: Copy>(keys: &[(f32, T)]) -> Vec<(f32, T)> {
 pub type TexFn<'a> = dyn FnMut(&str, bool) -> Result<Option<Vec<u8>>> + 'a;
 
 #[derive(serde::Serialize)]
-pub struct Summary { pub actor: String, pub joints: usize, pub vertices: usize, pub triangles: usize, pub clips: Vec<(String, f32)>, pub warnings: Vec<String> }
+pub struct Summary { pub actor: String, pub joints: usize, pub vertices: usize, pub triangles: usize, pub clips: Vec<(String, f32)>, /// Frame effects per clip: (time s, name).
+    pub effects: Vec<(String, Vec<(f32, String)>)>, pub warnings: Vec<String> }
 
-pub fn build(name: &str, a: &G3Actor, motions: &[(String, G3Motion)], tex: &mut TexFn) -> Result<(Vec<u8>, Summary)> {
+pub fn build(name: &str, a: &G3Actor, motions: &[(String, G3Motion)], textures_on: bool, tex: &mut TexFn) -> Result<(Vec<u8>, Summary)> {
     ensure!(!a.nodes.is_empty(), "the actor has no nodes");
     let order = parent_first(a);
     let mut new_of = vec![0usize; a.nodes.len()];
@@ -168,6 +169,7 @@ pub fn build(name: &str, a: &G3Actor, motions: &[(String, G3Motion)], tex: &mut 
                     let mut mat = json!({ "name": if src.name.is_empty() { format!("{name}_{s}") } else { src.name.clone() }, "pbrMetallicRoughness": { "metallicFactor": 0.0, "roughnessFactor": 1.0 } });
                     for (t, normal) in [(&src.diffuse, false), (&src.normal, true)] {
                         let Some(t) = t else { continue };
+                        if !textures_on { continue; }
                         let key = (t.clone(), normal);
                         let ti = match tex_index.get(&key) {
                             Some(x) => *x,
@@ -220,6 +222,7 @@ pub fn build(name: &str, a: &G3Actor, motions: &[(String, G3Motion)], tex: &mut 
     let names: std::collections::HashMap<String, usize> = (0..order.len()).map(|n| (a.nodes[order[n]].name.to_lowercase(), n)).collect();
     let mut gl_anims = vec![];
     let mut clips = vec![];
+    let mut effects = vec![];
     for (clip, motion) in motions {
         let tracked: std::collections::HashMap<usize, &crate::g3_motion::G3Track> = motion.tracks.iter().filter_map(|t| names.get(&t.bone.to_lowercase()).map(|&n| (n, t))).collect();
         if tracked.is_empty() { warnings.push(format!("clip {clip}: no track names a node of this actor")); continue; }
@@ -261,6 +264,7 @@ pub fn build(name: &str, a: &G3Actor, motions: &[(String, G3Motion)], tex: &mut 
             }
         }
         clips.push((clip.clone(), motion.duration));
+        effects.push((clip.clone(), motion.effects.clone()));
         gl_anims.push(json!({ "name": clip, "samplers": samplers, "channels": channels }));
     }
 
@@ -291,5 +295,5 @@ pub fn build(name: &str, a: &G3Actor, motions: &[(String, G3Motion)], tex: &mut 
     out.extend_from_slice(&(bin.data.len() as u32).to_le_bytes());
     out.extend_from_slice(&0x004E4942u32.to_le_bytes());
     out.extend_from_slice(&bin.data);
-    Ok((out, Summary { actor: name.into(), joints: order.len(), vertices: verts, triangles: tris, clips, warnings }))
+    Ok((out, Summary { actor: name.into(), joints: order.len(), vertices: verts, triangles: tris, clips, effects, warnings }))
 }

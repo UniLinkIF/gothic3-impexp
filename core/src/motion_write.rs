@@ -38,7 +38,7 @@ fn track(kind: u8, keys: impl Iterator<Item = (f32, Vec<f32>)>) -> Vec<u8> {
 
 /// `template` (a game clip) with `keys` (lowercase bone name -> keys) put in. Returns the file and the number of
 /// bones that got new keys.
-pub fn rewrite(template: &[u8], keys: &HashMap<String, Keys>) -> Result<(Vec<u8>, usize)> {
+pub fn rewrite(template: &[u8], keys: &HashMap<String, Keys>, effects: Option<&[(f32, String)]>) -> Result<(Vec<u8>, usize)> {
     if !template.starts_with(b"GENOMFLE") { bail!("the clip is not a GENOMFLE resource"); }
     let lma = template.windows(4).take(512).position(|w| w == b"LMA ").filter(|&p| p >= 4).context("no LMA motion in the clip")?;
     let lma_len = u32_at(template, lma - 4) as usize;
@@ -92,11 +92,33 @@ pub fn rewrite(template: &[u8], keys: &HashMap<String, Keys>) -> Result<(Vec<u8>
         for &(tp, _, ts, _) in &cs[i + 1..j] { if key_size(tp, ts) == 0 { body.extend(&template[tp..tp + 12 + ts]); } }
         i = j;
     }
-    let mut out = template[..lma - 4].to_vec();
+    let Some(fx) = effects else {
+        let mut out = template[..lma - 4].to_vec();
+        out.extend((body.len() as u32).to_le_bytes());
+        out.extend(&body);
+        let new_table = out.len() as u32;
+        out.extend(&template[table.max(end)..]);
+        out[10..14].copy_from_slice(&new_table.to_le_bytes());
+        return Ok((out, changed));
+    };
+    // New frame effects: the head up to the effect count, the effects, the motion, the string table with their names.
+    if template.len() < 46 || u16::from_le_bytes([template[14], template[15]]) < 5 { bail!("the clip's head is older than version 5"); }
+    let step = crate::g3_motion::decode_xmot(template).map(|m| crate::g3_motion::key_step(&m)).unwrap_or(1.0 / 30.0);
+    let mut strings = crate::g3_res::genomfle_strings(template).unwrap_or_default();
+    let mut out = template[..44].to_vec();
+    out.extend((fx.len() as u16).to_le_bytes());
+    for (t, name) in fx {
+        let i = match strings.iter().position(|s| s == name) { Some(i) => i, None => { strings.push(name.clone()); strings.len() - 1 } };
+        out.extend(((t / step).round().clamp(0.0, 65535.0) as u16).to_le_bytes());
+        out.extend((i as u16).to_le_bytes());
+    }
     out.extend((body.len() as u32).to_le_bytes());
     out.extend(&body);
     let new_table = out.len() as u32;
-    out.extend(&template[table.max(end)..]);
+    out.extend(0xDEADBEEFu32.to_le_bytes());
+    out.push(1);
+    out.extend((strings.len() as u32).to_le_bytes());
+    for s in &strings { out.extend((s.len() as u16).to_le_bytes()); out.extend(s.as_bytes()); }
     out[10..14].copy_from_slice(&new_table.to_le_bytes());
     Ok((out, changed))
 }
@@ -114,7 +136,7 @@ mod tests {
         let d = g.read(&k).unwrap();
         let m = crate::g3_motion::decode_xmot(&d).unwrap();
         let same: HashMap<String, Keys> = m.tracks.iter().map(|t| (t.bone.to_lowercase(), Keys { pos: t.pos.clone(), rot: t.rot.clone() })).collect();
-        let (w, n) = rewrite(&d, &same).unwrap();
+        let (w, n) = rewrite(&d, &same, None).unwrap();
         // Same layout to the byte (values differ only where the reader normalised a quaternion).
         assert_eq!(w.len(), d.len());
         assert!(n > 10);
@@ -127,7 +149,7 @@ mod tests {
         let mut up = same.clone();
         let t0 = &m.tracks.iter().find(|t| !t.pos.is_empty()).unwrap().bone;
         for k in up.get_mut(&t0.to_lowercase()).unwrap().pos.iter_mut() { k.1[1] += 10.0; }
-        let (w2, _) = rewrite(&d, &up).unwrap();
+        let (w2, _) = rewrite(&d, &up, None).unwrap();
         let back2 = crate::g3_motion::decode_xmot(&w2).unwrap();
         let a = &m.tracks.iter().find(|t| &t.bone == t0).unwrap().pos;
         let b = &back2.tracks.iter().find(|t| &t.bone == t0).unwrap().pos;
@@ -171,16 +193,28 @@ pub fn keys_from_glb(glb: &[u8]) -> Result<(String, HashMap<String, Keys>, f32)>
     Ok((name, out, t1 - t0))
 }
 
-#[derive(serde::Serialize)]
-pub struct Report { pub clip: String, pub bones: usize, pub keys: usize, pub duration: f32, pub path: String }
+/// What the add-on asks for: the game clip that is the template (and is replaced unless `as_name` is given), the glb, and
+/// optionally new frame effects (time s, name).
+#[derive(serde::Deserialize)]
+pub struct MotionSpec { pub clip: String, pub glb: String, #[serde(default)] pub as_name: Option<String>, #[serde(default)] pub effects: Option<Vec<(f32, String)>> }
 
-/// Clip `clip` of the game with the keys of `glb`: (report, the file for the mod).
-pub fn build(g: &crate::g3::G3Ctx, clip: &str, glb: &[u8]) -> Result<(Report, (String, String, Vec<u8>))> {
-    let key = g.find("_compiledanimation", &format!("{}.xmot", clip.trim_end_matches(".xmot"))).with_context(|| format!("{clip}: no such clip in Gothic 3 (only clips of the game can be replaced)"))?;
-    let (_, keys, duration) = keys_from_glb(glb)?;
-    let (bytes, bones) = rewrite(&g.read(&key)?, &keys)?;
+#[derive(serde::Serialize)]
+pub struct Report { pub clip: String, pub template: String, pub new: bool, pub bones: usize, pub keys: usize, pub duration: f32, pub effects: usize, pub path: String }
+
+/// The clip for the mod: the template clip with the glb's keys, under its own name or `as_name` (a new clip beside the
+/// game's, named the way the game names them so the animation system can pick it).
+pub fn build(g: &crate::g3::G3Ctx, spec: &MotionSpec) -> Result<(Report, (String, String, Vec<u8>))> {
+    let clip = &spec.clip;
+    let key = g.find("_compiledanimation", &format!("{}.xmot", clip.trim_end_matches(".xmot"))).with_context(|| format!("{clip}: no such clip in Gothic 3"))?;
+    let (_, keys, duration) = keys_from_glb(&std::fs::read(&spec.glb).with_context(|| format!("read {}", spec.glb))?)?;
+    let template = g.read(&key)?;
+    let (bytes, bones) = rewrite(&template, &keys, spec.effects.as_deref())?;
+    let effects = match &spec.effects { Some(f) => f.len(), None => crate::g3_motion::frame_effects(&template).map(|f| f.len()).unwrap_or(0) };
     if bones == 0 { bail!("none of the clip's bones is in the exported animation — is it the right armature?"); }
-    let path = g.path_of(&key).unwrap_or(&key).to_string();
+    let template_path = g.path_of(&key).unwrap_or(&key).to_string();
+    let new = spec.as_name.as_deref().filter(|n| !n.is_empty() && !n.eq_ignore_ascii_case(&crate::stem_of(&template_path)));
+    if let Some(n) = new { if !n.chars().all(|c| c.is_ascii_alphanumeric() || "_%-".contains(c)) { bail!("clip name {n:?}: letters, digits, _ % - only"); } }
+    let path = match new { Some(n) => format!("{n}.xmot"), None => template_path.clone() };
     let n = keys.values().map(|k| k.pos.len() + k.rot.len()).sum();
-    Ok((Report { clip: crate::stem_of(&path), bones, keys: n, duration, path: format!("_compiledAnimation/{path}") }, ("_compiledAnimation".to_string(), path, bytes)))
+    Ok((Report { clip: crate::stem_of(&path), template: crate::stem_of(&template_path), new: new.is_some(), bones, keys: n, duration, effects, path: format!("_compiledAnimation/{path}") }, ("_compiledAnimation".to_string(), path, bytes)))
 }

@@ -33,6 +33,9 @@ class G3ImpExpPreferences(bpy.types.AddonPreferences):
 
     def draw(self, context):
         col = self.layout.column()
+        about = col.box()
+        about.label(text="Gothic 3 ImpExp by UniLinkIF — GPL-3.0-or-later with additional terms (NOTICE)", icon="INFO")
+        about.operator("wm.url_open", text="github.com/UniLinkIF/gothic3-impexp", icon="URL").url = "https://github.com/UniLinkIF/gothic3-impexp"
         col.prop(self, "game_dir")
         col.prop(self, "core_exe")
         col.prop(self, "cache_dir")

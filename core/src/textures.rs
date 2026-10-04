@@ -24,11 +24,19 @@ pub fn convert_normal(rgba: &[u8]) -> Vec<u8> {
     }).collect()
 }
 
-/// `_compiledimage` key of a texture named in a material or actor (`X.tga`, `X` or a path).
+/// `_compiledimage` key of a texture named in a material or actor (`X.tga`, `X` or a path). Some actors name a
+/// texture the game ships under another suffix (`…_Normal_Amplitude10_01` for `…_Normal_S1`): then the image with
+/// the same name up to its role (`_Diffuse`, `_Normal`, `_Specular`) is taken, `_S1` / `_01` first.
 pub fn image_key(g: &G3Ctx, tex: &str) -> Option<String> {
     let file = tex.rsplit(['/', '\\']).next()?;
     let stem = file.rsplit_once('.').map(|(s, _)| s).unwrap_or(file);
-    g.find("_compiledimage", &format!("{stem}.ximg"))
+    if let Some(k) = g.find("_compiledimage", &format!("{stem}.ximg")) { return Some(k); }
+    let l = stem.to_lowercase();
+    let cut = ["_diffuse", "_normal", "_specular"].iter().filter_map(|r| l.find(r).map(|i| i + r.len())).min()?;
+    let base = format!("/{}_", &l[..cut]);
+    let mut found: Vec<String> = g.keys().into_iter().filter(|k| k.starts_with("_compiledimage/") && k.contains(&base)).collect();
+    found.sort_by_key(|k| (!(k.ends_with("_s1.ximg") || k.ends_with("_01.ximg")), k.len()));
+    found.into_iter().next()
 }
 
 /// Role of a texture from its name (`_Diffuse_`, `_Normal_`, `_Specular_`: the shipped naming).

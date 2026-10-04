@@ -25,7 +25,7 @@ Import and export **Gothic 3** (Piranha Bytes, 2006, Genome engine) models, char
 | Entry | Writes |
 |---|---|
 | Gothic 3 Model → Mod | `.xcmsh` replacing the game's mesh of the same name or a new one, new materials (`.xshmat` from game templates: opaque, specular, alpha test) and images (`.ximg`), collision (`.xnvmsh`, from the `*_COL` objects or the model itself) |
-| Gothic 3 Motion → Mod | a `.xmot` replacing one of the game's clips (by default the one the action came from); IK and other constraints go in as their result |
+| Gothic 3 Motion → Mod | a `.xmot` replacing one of the game's clips (by default the one the action came from) or a new clip beside it; IK and other constraints go in as their result; frame effects (footsteps, sounds) from the action's list, edited in the Gothic 3 tab |
 | Gothic 3 Actor → Mod | a `.xact` — your mesh on a game skeleton (armour, bodies, heads, creatures with one mesh), weights from vertex groups |
 
 Mods go into the game as a patch volume per archive (`Data\_compiledMesh.pNN` and so on, after the game's own), the way
@@ -40,7 +40,7 @@ pose.
 ## Install
 
 1. Blender 5.1 or newer.
-2. *Edit → Preferences → Get Extensions → ⌄ → Install from Disk…* → `gothic3_impexp-0.9.0.zip`.
+2. *Edit → Preferences → Get Extensions → ⌄ → Install from Disk…* → `gothic3_impexp-0.9.1.zip`.
 3. In the add-on's preferences check **Gothic 3 game folder** (the one with `Gothic3.exe`; the Steam default is
    filled in).
 
@@ -61,7 +61,8 @@ Installed mods live in `Gothic 3\gothic3_impexp\` (their files and a list) plus 
 - Meshes are written in the plain form (version-1 elements: positions, normals, one uv set, tangents); the extra arrays
   of the game's own meshes (lightmap uvs, vertex colours) are not written.
 - Collision streams follow the game's layout; the per-edge contact flags are computed by Risen's rule, not Gothic 3's.
-- Motions can only replace a clip the game has; actors only replace (or sit beside) a one-mesh actor of the game.
+- A new motion takes a game clip as its template (its bones and structure); actors only replace (or sit beside) a
+  one-mesh actor of the game.
 - A new model or actor shows up in the game only once something places or references it.
 
 ## Notes
@@ -78,8 +79,16 @@ cd core && cargo build --release                          # gothic3-core.exe
 BLENDER=/path/to/blender.exe tools/build_release.sh       # dist/gothic3_impexp-<version>.zip
 ```
 
-## Legal
+## License
 
-Gothic 3 is © Piranha Bytes / THQ Nordic. This add-on ships no game data; it reads the game you own.
+Copyright © 2026 UniLinkIF. Gothic 3 ImpExp is free software under the **GNU GPL 3.0 or later** (`LICENSE`) **with
+additional terms** under its section 7 (`NOTICE`), which go with every copy and every modified version:
 
-License: GPL-3.0-or-later (see `LICENSE`).
+- **Attribution:** keep `NOTICE`, the copyright line and the attribution "Gothic 3 ImpExp by UniLinkIF" with the link
+  to this repository (in the add-on's preferences and in the documentation).
+- **Origin:** a modified version must say it is modified and by whom, carry a different name and version, and must
+  not be presented as the original or as made or endorsed by UniLinkIF.
+- **Names:** no rights to the names "Gothic 3 ImpExp" or "UniLinkIF" for forks, products or publicity.
+
+Gothic 3 is © Piranha Bytes / THQ Nordic. This add-on ships no game data and is not affiliated with them; it reads the
+game you own.

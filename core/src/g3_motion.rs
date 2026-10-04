@@ -51,7 +51,8 @@ pub struct G3Track {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct G3Motion { pub tracks: Vec<G3Track>, pub duration: f32 }
+pub struct G3Motion { pub tracks: Vec<G3Track>, pub duration: f32, /// Frame effects (sounds, footsteps, hits) as (time s, effect name).
+    pub effects: Vec<(f32, String)> }
 
 fn u32_at(d: &[u8], p: usize) -> Result<u32> { Ok(u32::from_le_bytes(d.get(p..p + 4).with_context(|| format!("motion runs short at 0x{p:x}"))?.try_into().unwrap())) }
 fn f32_at(d: &[u8], p: usize) -> Result<f32> { Ok(f32::from_bits(u32_at(d, p)?)) }
@@ -122,6 +123,8 @@ pub fn decode_xmot(d: &[u8]) -> Result<G3Motion> {
         }
     }
     m.duration = m.tracks.iter().flat_map(|t| t.pos.iter().map(|k| k.0).chain(t.rot.iter().map(|k| k.0)).chain(t.scale.iter().map(|k| k.0))).fold(0f32, f32::max);
+    let step = key_step(&m);
+    m.effects = frame_effects(d).unwrap_or_default().into_iter().map(|(f, n)| (f as f32 * step, n)).collect();
     Ok(m)
 }
 
@@ -265,4 +268,52 @@ mod tests {
             if !flip { assert!(idle < 0.1 && low > -8.0 && high < 25.0 && stretch < 0.01, "{idle} {low} {high} {stretch}"); } else { assert!(idle > 10.0 || high > 50.0); }
         }
     }
+}
+#[cfg(test)]
+mod fx_probe {
+    #[test]
+    #[ignore]
+    fn probe() {
+        let g = crate::g3::G3Ctx::open(std::path::Path::new(&std::env::var("G3_GAME").unwrap())).unwrap();
+        let (mut n, mut with) = (0, 0);
+        let mut vers = std::collections::BTreeMap::<u16, usize>::new();
+        for k in g.keys().into_iter().filter(|k| k.ends_with(".xmot")) {
+            let d = g.read(&k).unwrap();
+            let v = u16::from_le_bytes([d[14], d[15]]);
+            *vers.entry(v).or_default() += 1;
+            n += 1;
+            if v >= 5 { let c = u16::from_le_bytes([d[44], d[45]]); if c > 0 { with += 1; if with < 4 { let t = crate::g3_res::genomfle_strings(&d).unwrap(); let mut p = 46; let mut fx = vec![]; for _ in 0..c { let f = u16::from_le_bytes([d[p], d[p + 1]]); let i = u16::from_le_bytes([d[p + 2], d[p + 3]]) as usize; fx.push((f, t.get(i).cloned())); p += 4; } eprintln!("FX {k}: {fx:?} next4 {:?} table {t:?}", &d[p + 4..p + 8]); } } }
+        }
+        eprintln!("{n} clips, versions {vers:?}, {with} with effects");
+    }
+}
+
+/// The resource head before the motion (after the 14-byte GENOMFLE head), version 5 in every clip:
+/// ```text
+/// u16 version · u32 resource size · f32 priority · FILETIME · u32 native size · FILETIME (v ≥ 3)
+/// · u16 frame effects (v ≥ 2) · per effect: u16 key frame · u16 effect name (index into the string table)
+/// ```
+/// 1301 of the 5752 clips have effects: `eff_step_…` footsteps, `eff_creature_…_attack_…` sounds.
+pub fn frame_effects(d: &[u8]) -> Result<Vec<(u16, String)>> {
+    if !d.starts_with(b"GENOMFLE") || d.len() < 46 { bail!("not a GENOMFLE clip"); }
+    if u16::from_le_bytes([d[14], d[15]]) < 5 { return Ok(vec![]); }
+    let n = u16::from_le_bytes([d[44], d[45]]) as usize;
+    if n == 0 { return Ok(vec![]); }
+    let table = crate::g3_res::genomfle_strings(d)?;
+    (0..n).map(|i| {
+        let p = 46 + i * 4;
+        let f = u16::from_le_bytes([d[p], d[p + 1]]);
+        let s = u16::from_le_bytes([d[p + 2], d[p + 3]]) as usize;
+        Ok((f, table.get(s).cloned().with_context(|| format!("effect name {s} not in the table"))?))
+    }).collect()
+}
+
+/// Seconds per key frame of a clip (the most common gap between rotation keys; 1/30 when there is none).
+pub fn key_step(m: &G3Motion) -> f32 {
+    let mut gaps: Vec<i64> = m.tracks.iter().flat_map(|t| t.rot.windows(2).map(|w| ((w[1].0 - w[0].0) * 1e5).round() as i64)).filter(|&g| g > 0).collect();
+    gaps.sort();
+    let mut best = (0, 0i64);
+    let mut i = 0;
+    while i < gaps.len() { let j = gaps[i..].iter().take_while(|&&g| g == gaps[i]).count(); if j > best.0 { best = (j, gaps[i]); } i += j; }
+    if best.0 == 0 { 1.0 / 30.0 } else { best.1 as f32 / 1e5 }
 }

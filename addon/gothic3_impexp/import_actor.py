@@ -183,6 +183,11 @@ class G3_OT_import_motion(bpy.types.Operator):
                 if a.name.startswith(c):
                     a.name = c
                     a["g3_clip"] = c
+        from . import effects
+        fx = dict(out.get("effects", []))
+        for a in acts:
+            if a.get("g3_clip") in fx:
+                effects.store(context.scene, a, fx[a["g3_clip"]])
         context.view_layer.objects.active = arm
         arm.select_set(True)
         if arm.animation_data is None:
