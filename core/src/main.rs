@@ -10,15 +10,21 @@
 //!                                                           actor (+ clips: "" none, "@file" names, words; a head actor
 //!                                                           put on a body by bone name; skeleton = no textures)
 //! gothic3-core clips <game> <actor> [words] [limit]         clips that fit the actor
+//! gothic3-core export <game> <spec.json> install <mod> | package <folder> <title>
+//!                                                           a model from Blender into the game or a mod package
+//! gothic3-core installed <game>                             mods installed from Blender
+//! gothic3-core uninstall <game> <mod>                       remove one
 //! ```
 
 mod cook;
 mod dds;
+mod export;
 mod g3;
 mod g3_actor;
 mod g3_motion;
 mod g3_res;
 mod g3_write;
+mod mods;
 mod nxs;
 mod geom;
 mod glb;
@@ -128,7 +134,13 @@ fn run(args: &[String]) -> Result<serde_json::Value> {
             v["glb"] = serde_json::json!(out.to_string_lossy());
             v
         }
-        _ => bail!("usage: gothic3-core keys|find|mesh|collision|clips|actor <game folder> …"),
+        (Some("export"), Some(game)) => {
+            let g = open(game)?;
+            export::run(&g, Path::new(game), a(3).context("spec.json")?, a(4).unwrap_or("install"), a(5).context("mod name or package folder")?, a(6).unwrap_or(""))?
+        }
+        (Some("installed"), Some(game)) => serde_json::to_value(mods::installed(Path::new(game)))?,
+        (Some("uninstall"), Some(game)) => { mods::uninstall(Path::new(game), a(3).context("mod name")?)?; serde_json::json!(true) }
+        _ => bail!("usage: gothic3-core keys|find|mesh|collision|clips|actor|export|installed|uninstall <game folder> …"),
     })
 }
 

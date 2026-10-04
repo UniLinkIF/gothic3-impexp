@@ -25,12 +25,18 @@ class G3ImpExpPreferences(bpy.types.AddonPreferences):
         description="Куди складати розпаковані текстури й моделі (типово — тимчасова папка)",
         subtype="DIR_PATH",
     )
+    mods_dir: StringProperty(
+        name="Папка модів",
+        description="Куди «Пакет мода» кладе томи з INSTALL.bat / ROLLBACK.bat",
+        subtype="DIR_PATH",
+    )
 
     def draw(self, context):
         col = self.layout.column()
         col.prop(self, "game_dir")
         col.prop(self, "core_exe")
         col.prop(self, "cache_dir")
+        col.prop(self, "mods_dir")
 
 
 def prefs(context=None):
