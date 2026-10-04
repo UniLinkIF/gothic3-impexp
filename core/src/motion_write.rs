@@ -1,7 +1,7 @@
 //! Writing a Gothic 3 motion (`.xmot`): a clip of the game rewritten with new keys.
 //!
-//! The game's clip is the template: its GENOMFLE head, its tracks and the key-track class values (`vtable`, see
-//! `g3_motion.rs`) stay; for every bone that has a track there, the position and rotation keys become the new
+//! The game's clip is the template: its GENOMFLE head (resource properties and frame effects) and its tracks
+//! stay; for every bone that has a track there, the position and rotation keys become the new
 //! ones and the pose (the first frame) follows them. Scale tracks and bones without new keys stay as they were.
 //!
 //! ```text
@@ -18,9 +18,7 @@ pub struct Keys { pub pos: Vec<(f32, [f32; 3])>, pub rot: Vec<(f32, [f32; 4])> }
 
 fn u32_at(d: &[u8], p: usize) -> u32 { u32::from_le_bytes(d[p..p + 4].try_into().unwrap()) }
 
-const POS_DELTA: u32 = 0u32.wrapping_sub(0x200);
-/// The rotation key-track value when the clip has no rotation track to take it from.
-const DEFAULT_ROT_VT: u32 = 0x023f524c;
+const LINEAR: u8 = b'L';
 
 fn chunk(o: &mut Vec<u8>, id: u32, version: u32, body: &[u8]) {
     o.extend(id.to_le_bytes());
@@ -29,11 +27,11 @@ fn chunk(o: &mut Vec<u8>, id: u32, version: u32, body: &[u8]) {
     o.extend(body);
 }
 
-fn track(vt: u32, keys: impl Iterator<Item = (f32, Vec<f32>)>) -> Vec<u8> {
+fn track(kind: u8, keys: impl Iterator<Item = (f32, Vec<f32>)>) -> Vec<u8> {
     let keys: Vec<(f32, Vec<f32>)> = keys.collect();
     let mut b = vec![];
     b.extend((keys.len() as u32).to_le_bytes());
-    b.extend(vt.to_le_bytes());
+    b.extend([LINEAR, kind, 0, 0]);
     for (t, v) in keys { b.extend(t.to_le_bytes()); for x in v { b.extend(x.to_le_bytes()); } }
     b
 }
@@ -57,7 +55,6 @@ pub fn rewrite(template: &[u8], keys: &HashMap<String, Keys>) -> Result<(Vec<u8>
         p += 12 + size;
     }
     let key_size = |p: usize, size: usize| -> usize { let n = u32_at(template, p + 12) as usize; if n == 0 { 0 } else { (size - 8) / n } };
-    let rot_vt = cs.iter().find(|&&(p, id, size, _)| id == 2 && key_size(p, size) == 20).map(|&(p, ..)| u32_at(template, p + 16)).unwrap_or(DEFAULT_ROT_VT);
 
     let mut body = template[lma..lma + 7].to_vec();
     let mut changed = 0;
@@ -87,16 +84,12 @@ pub fn rewrite(template: &[u8], keys: &HashMap<String, Keys>) -> Result<(Vec<u8>
         if let Some((_, q)) = k.rot.first() { for c in 0..4 { sub[12 + c * 4..16 + c * 4].copy_from_slice(&q[c].to_le_bytes()); } }
         chunk(&mut body, 1, ver, &sub);
         // Position and rotation tracks (in EMotionFX's order), then the template's scale tracks as they were.
-        let old_pos = cs[i + 1..j].iter().any(|&(tp, _, ts, _)| key_size(tp, ts) == 16 && u32_at(template, tp + 16).wrapping_sub(rot_vt) == POS_DELTA);
-        if !k.pos.is_empty() { chunk(&mut body, 2, 1, &track(rot_vt.wrapping_add(POS_DELTA), k.pos.iter().map(|(t, v)| (*t, v.to_vec())))); }
-        else if old_pos { for &(tp, _, ts, _) in &cs[i + 1..j] { if key_size(tp, ts) == 16 && u32_at(template, tp + 16).wrapping_sub(rot_vt) == POS_DELTA { body.extend(&template[tp..tp + 12 + ts]); } } }
-        if !k.rot.is_empty() { chunk(&mut body, 2, 1, &track(rot_vt, k.rot.iter().map(|(t, q)| (*t, q.to_vec())))); }
-        else { for &(tp, _, ts, _) in &cs[i + 1..j] { if key_size(tp, ts) == 20 { body.extend(&template[tp..tp + 12 + ts]); } } }
-        for &(tp, _, ts, _) in &cs[i + 1..j] {
-            let ks = key_size(tp, ts);
-            if ks == 16 && u32_at(template, tp + 16).wrapping_sub(rot_vt) != POS_DELTA { body.extend(&template[tp..tp + 12 + ts]); }
-            if ks == 0 { body.extend(&template[tp..tp + 12 + ts]); }
-        }
+        let kind = |tp: usize| template[tp + 17];
+        let old = |c: u8| -> Vec<u8> { cs[i + 1..j].iter().filter(|&&(tp, _, ts, _)| key_size(tp, ts) > 0 && kind(tp) == c).flat_map(|&(tp, _, ts, _)| template[tp..tp + 12 + ts].to_vec()).collect() };
+        if !k.pos.is_empty() { chunk(&mut body, 2, 1, &track(b'P', k.pos.iter().map(|(t, v)| (*t, v.to_vec())))); } else { body.extend(old(b'P')); }
+        if !k.rot.is_empty() { chunk(&mut body, 2, 1, &track(b'R', k.rot.iter().map(|(t, q)| (*t, q.to_vec())))); } else { body.extend(old(b'R')); }
+        body.extend(old(b'S'));
+        for &(tp, _, ts, _) in &cs[i + 1..j] { if key_size(tp, ts) == 0 { body.extend(&template[tp..tp + 12 + ts]); } }
         i = j;
     }
     let mut out = template[..lma - 4].to_vec();

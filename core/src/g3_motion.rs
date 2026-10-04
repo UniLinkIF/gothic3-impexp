@@ -6,19 +6,18 @@
 //! ```text
 //! u32 LMA bytes (counted from "LMA ") · "LMA " · u8 1 · u8 1 · u8 0 · chunks to the end (the GENOMFLE tail follows):
 //!   u32 id · u32 size (body bytes after the version) · u32 version · body
-//!   1 v3  submotion: f32 pos[3] · quat[4] (x y z w) · f32 scale[3] · 40 bytes (stale pointers, ignored)
+//!   1 v3  submotion: f32 pose position[3] · quat[4] (x y z w) · f32 scale[3] · the bind pose (position, rotation, scale)
 //!                    · u32 len · name                                    -> starts a track for node `name`
-//!   2 v1  key track of the submotion before it: u32 n · u32 vtable · n × key
-//!                    key = f32 time (s) · value: 20-byte keys = quat (x y z w), 16-byte keys = vec3
-//!                    a vec3 track is position when vtable = rotation vtable - 0x200, scale when + 0x100
-//!                    (vtable = the C++ key-track class pointer saved with the file; only the deltas are stable)
+//!   2 v1  key track of the submotion before it: u32 n · u8 interpolation ('L' linear) · u8 kind ('P' position,
+//!                    'R' rotation, 'S' scale) · u16 padding (left as it was in memory) · n × key
+//!                    key = f32 time (s) · value: quat (x y z w) for rotation, vec3 otherwise
 //! ```
 //!
 //! Real bytes (wolf ambient loop, node `Wolf_Tail_Tail_4`):
 //! ```text
 //! 0036: 4c4d4120 01 01 00                               "LMA " 1.1
 //! 145b: 01000000 64000000 03000000 80a68841 ...         submotion, 100 bytes, pos.x 17.08 …
-//! 14cb: 02000000 ec070000 01000000 65000000 4c523f02    key track, 2028 bytes, 101 keys, vtable 023f524c
+//! 14cb: 02000000 ec070000 01000000 65000000 4c523f02    key track, 2028 bytes, 101 keys, 'L' 'R'
 //! 14df: 00000000 00000000 5c012e3b 00000000 00fe7f3f    t 0 · rot (0, 0.00266, 0, 0.99997)
 //! ```
 //!
@@ -73,10 +72,6 @@ fn chunks(d: &[u8]) -> Result<Vec<(usize, u32, usize, u32)>> {
     Ok(v)
 }
 
-/// vtable(position track) - vtable(rotation track), vtable(scale track) - vtable(rotation track).
-const POS_VT: u32 = 0u32.wrapping_sub(0x200);
-const SCALE_VT: u32 = 0x100;
-
 pub fn decode_xmot(d: &[u8]) -> Result<G3Motion> {
     let cs = chunks(d)?;
     let key_size = |p: usize, size: usize| -> Result<usize> {
@@ -84,10 +79,7 @@ pub fn decode_xmot(d: &[u8]) -> Result<G3Motion> {
         let n = u32_at(d, p + 12)? as usize;
         Ok(if n == 0 { 0 } else { (size - 8) / n })
     };
-    let mut rot_vt = None;
-    for &(p, id, size, _) in &cs { if id == 2 && key_size(p, size)? == 20 { rot_vt = Some(u32_at(d, p + 16)?); break; } }
     let mut m = G3Motion::default();
-    let mut seen_rot = false;
     for &(p, id, size, _) in &cs {
         let b = p + 12;
         match id {
@@ -99,11 +91,10 @@ pub fn decode_xmot(d: &[u8]) -> Result<G3Motion> {
                 if 84 + n > size { bail!("name of {n} bytes in a {size}-byte submotion at 0x{p:x}"); }
                 let bone = String::from_utf8_lossy(&d[b + 84..b + 84 + n]).into_owned();
                 m.tracks.push(G3Track { bone, pose_pos, pose_rot, ..Default::default() });
-                seen_rot = false;
             }
             2 => {
                 let n = u32_at(d, b)? as usize;
-                let vt = u32_at(d, b + 4)?;
+                let kind = *d.get(b + 5).context("key track runs short")?;
                 let k = key_size(p, size)?;
                 if n * k + 8 != size { bail!("{n} keys don't fill a {size}-byte track at 0x{p:x}"); }
                 let t = m.tracks.last_mut().with_context(|| format!("key track at 0x{p:x} before any submotion"))?;
@@ -118,14 +109,9 @@ pub fn decode_xmot(d: &[u8]) -> Result<G3Motion> {
                             let q = if l > 1e-3 { q.map(|x| x / l) } else { t.rot.last().map(|k| k.1).unwrap_or([0.0, 0.0, 0.0, 1.0]) };
                             t.rot.push((key(i, 0)?, q));
                         }
-                        seen_rot = true;
                     }
                     16 => {
-                        let scale = match rot_vt {
-                            Some(r) => match vt.wrapping_sub(r) { POS_VT => false, SCALE_VT => true, x => bail!("vec3 track at 0x{p:x} with vtable delta {x:x}") },
-                            // No rotation track in the file: EMotionFX writes position, rotation, scale.
-                            None => seen_rot || !t.pos.is_empty(),
-                        };
+                        let scale = match kind { b'P' => false, b'S' => true, x => bail!("vec3 track at 0x{p:x} of kind {:?}", x as char) };
                         let v = if scale { &mut t.scale } else { &mut t.pos };
                         for i in 0..n { v.push((key(i, 0)?, [key(i, 1)?, key(i, 2)?, key(i, 3)?])); }
                     }
