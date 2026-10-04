@@ -1,4 +1,4 @@
-//! A static mesh (`.xcmsh`) and its collision (`_COL.xnvmsh`) as OBJ for Blender's OBJ importer.
+//! A static mesh (`.xcmsh`) and its collision (`.xnvmsh`) as OBJ for Blender's OBJ importer.
 //!
 //! Gothic 3 is left-handed, Y up, in centimetres. The OBJ is written as (x, y, -z) and imported with forward -Z,
 //! up Y and scale 0.01, so Blender gets metres in its own axes. Positions are welded (one OBJ vertex per position);
@@ -106,23 +106,47 @@ pub fn export_obj(g: &G3Ctx, name: &str, out_dir: &Path) -> Result<MeshOut> {
     Ok(MeshOut { entry: key, obj: obj_path.to_string_lossy().into_owned(), vertices: weld.len(), triangles: tris, materials, warnings })
 }
 
-/// The collision of mesh `name` (`<name>_COL.xnvmsh`) as an OBJ, or an error when the game has none.
+/// Where the game keeps the collision of mesh `name`: `_compiledPhysic/<name>_COL.xnvmsh` for objects, or next
+/// to the mesh as `<name>.xnvmsh` (the landscape cells, whose collision is their own triangles).
+pub fn collision_key(g: &G3Ctx, name: &str) -> Option<String> {
+    let n = name.trim_end_matches(".xcmsh").trim_end_matches("_COL");
+    g.find("_compiledphysic", &format!("{n}_COL.xnvmsh")).or_else(|| mesh_key(g, n).map(|k| k.replace(".xcmsh", ".xnvmsh")).filter(|k| g.size_of(k).is_some()))
+}
+
+/// The shape material of stream `i` (the landscape lists one per stream; objects' tables need not match).
+pub fn stream_shape(x: &crate::g3_res::Xnv, i: usize) -> &'static str {
+    let v = x.shapes.get(i).map(|s| s[0] as usize).unwrap_or(0);
+    crate::g3_write::SHAPE_MATERIALS.get(v).copied().unwrap_or("none")
+}
+
+/// The collision of mesh `name` as an OBJ, one group per cooked mesh with its shape material as the OBJ material
+/// (`G3_Shape_<material>`), or an error when the game has none.
 pub fn collision_obj(g: &G3Ctx, name: &str, out: &Path) -> Result<serde_json::Value> {
     let n = name.trim_end_matches(".xcmsh").trim_end_matches("_COL");
-    let key = g.find("_compiledphysic", &format!("{n}_COL.xnvmsh")).with_context(|| format!("{n}: Gothic 3 has no collision mesh for it"))?;
-    let tris = crate::g3_res::xnvmsh_triangles(&g.read(&key)?)?;
+    let key = collision_key(g, n).with_context(|| format!("{n}: Gothic 3 has no collision mesh for it"))?;
+    let x = crate::g3_res::parse_xnvmsh(&g.read(&key)?)?;
     let mut obj = String::from("# Gothic 3 collision: game axes mirrored in Z, centimetres\n");
     let mut weld: HashMap<[u32; 3], usize> = HashMap::new();
     let mut faces = String::new();
-    for t in &tris {
-        let ids: Vec<usize> = t.iter().map(|p| {
-            let k = weld.len();
-            *weld.entry(p.map(f32::to_bits)).or_insert_with(|| { let _ = writeln!(obj, "v {} {} {}", p[0], p[1], -p[2]); k }) + 1
-        }).collect();
-        let _ = writeln!(faces, "f {} {} {}", ids[0], ids[1], ids[2]);
+    let mut tris = 0;
+    let mut shapes = vec![];
+    for (i, (st, _)) in x.streams.iter().enumerate() {
+        let m = crate::nxs::read_trimesh(&mut crate::nxs::Reader { d: st, at: 0 }).with_context(|| format!("{key}: stream {i}"))?;
+        let shape = stream_shape(&x, i);
+        shapes.push(shape);
+        let _ = writeln!(faces, "usemtl G3_Shape_{shape}");
+        for t in &m.tris {
+            let ids: Vec<usize> = t.iter().map(|&k| {
+                let p = m.verts[k as usize].map(|v| v * 100.0);
+                let id = weld.len();
+                *weld.entry(p.map(f32::to_bits)).or_insert_with(|| { let _ = writeln!(obj, "v {} {} {}", p[0], p[1], -p[2]); id }) + 1
+            }).collect();
+            let _ = writeln!(faces, "f {} {} {}", ids[0], ids[1], ids[2]);
+            tris += 1;
+        }
     }
     obj += &faces;
     if let Some(p) = out.parent() { std::fs::create_dir_all(p)?; }
     std::fs::write(out, obj)?;
-    Ok(serde_json::json!({ "entry": key, "obj": out.to_string_lossy(), "triangles": tris.len() }))
+    Ok(serde_json::json!({ "entry": key, "obj": out.to_string_lossy(), "triangles": tris, "shapes": shapes }))
 }

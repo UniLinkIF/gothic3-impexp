@@ -39,8 +39,9 @@ fn resource_head(r: &mut Rd, class: &str) -> Result<()> {
 }
 
 /// A decoded `.xcmsh` (`eCResourceMeshComplex_PS`): one submesh per mesh element, the vertices of all elements
-/// concatenated. Material names keep their `.xshmat` extension.
-pub struct G3Mesh { pub geo: crate::geom::MeshGeometry, pub streams: Vec<u32>, pub colors: bool }
+/// concatenated. Material names keep their `.xshmat` extension. Vertex colours (streams 4 and 5) per vertex, white /
+/// opaque black where an element has none. `elements`: (first vertex, vertices) of each element.
+pub struct G3Mesh { pub geo: crate::geom::MeshGeometry, pub streams: Vec<u32>, pub colors: bool, pub diffuse: Vec<u32>, pub specular: Vec<u32>, pub elements: Vec<(u32, u32)> }
 
 pub fn decode_xcmsh(bytes: &[u8]) -> Result<G3Mesh> {
     let mut r = Rd::open(bytes)?;
@@ -55,6 +56,8 @@ pub fn decode_xcmsh(bytes: &[u8]) -> Result<G3Mesh> {
     let mut g = crate::geom::MeshGeometry { positions: vec![], normals: vec![], uvs: vec![], indices: vec![], submeshes: vec![] };
     let mut streams = vec![];
     let mut colors = false;
+    let (mut diffuse, mut specular) = (vec![], vec![]);
+    let mut ranges = vec![];
     for _ in 0..elements {
         let ever = r.u16()?;
         r.u32()?;
@@ -62,7 +65,7 @@ pub fn decode_xcmsh(bytes: &[u8]) -> Result<G3Mesh> {
         let material = r.str()?;
         let base = g.positions.len() as u32;
         let first_index = g.indices.len() as u32;
-        let (mut pos, mut nrm, mut uv, mut idx) = (vec![], vec![], vec![], vec![]);
+        let (mut pos, mut nrm, mut uv, mut idx, mut dif, mut spe) = (vec![], vec![], vec![], vec![], vec![], vec![]);
         for _ in 0..r.u32()? {
             let ty = r.u32()?;
             r.skip(3)?;
@@ -73,7 +76,9 @@ pub fn decode_xcmsh(bytes: &[u8]) -> Result<G3Mesh> {
                 1 => for _ in 0..n { pos.push(r.v3()?) },
                 3 => for _ in 0..n { nrm.push(r.v3()?) },
                 12 => for _ in 0..n { uv.push([r.f32()?, r.f32()?]) },
-                4 | 5 | 6 => { colors |= ty != 6; r.skip(n * 4)? }
+                4 => { colors = true; for _ in 0..n { dif.push(r.u32()?) } }
+                5 => { colors = true; for _ in 0..n { spe.push(r.u32()?) } }
+                6 => r.skip(n * 4)?,
                 15 | 18 | 21 | 73 => r.skip(n * 8)?,
                 64 | 72 => r.skip(n * 12)?,
                 2 => r.skip(n * 16)?,
@@ -92,13 +97,18 @@ pub fn decode_xcmsh(bytes: &[u8]) -> Result<G3Mesh> {
         let before = g.positions.len();
         if !nrm.is_empty() || !g.normals.is_empty() { g.normals.resize(before, [0.0, 1.0, 0.0]); if nrm.is_empty() { nrm.resize(nv, [0.0, 1.0, 0.0]); } }
         if !uv.is_empty() || !g.uvs.is_empty() { g.uvs.resize(before, [0.0, 0.0]); if uv.is_empty() { uv.resize(nv, [0.0, 0.0]); } }
+        dif.resize(nv, 0xffff_ffff);
+        spe.resize(nv, 0xff00_0000);
+        ranges.push((before as u32, nv as u32));
+        diffuse.extend(dif);
+        specular.extend(spe);
         g.positions.extend(pos);
         g.normals.extend(nrm);
         g.uvs.extend(uv);
         g.indices.extend(idx.iter().map(|i| i + base));
         g.submeshes.push(crate::geom::SubRange { material, first_index, index_count: g.indices.len() as u32 - first_index });
     }
-    Ok(G3Mesh { geo: g, streams, colors })
+    Ok(G3Mesh { geo: g, streams, colors, diffuse, specular, elements: ranges })
 }
 
 /// Strings of a `GENOMFLE` file's string table (u32 table offset at 10; at the table: u32 magic, u8, u32 count,
@@ -217,4 +227,35 @@ pub fn xnvmsh_triangles(d: &[u8]) -> Result<Vec<[[f32; 3]; 3]>> {
         i = is + nt * 3 * w;
     }
     Ok(out)
+}
+
+/// A `.xnvmsh` as the game writes it: cooked PhysX streams with their boxes (cm), the box of all (mostly empty:
+/// FLT_MAX, -FLT_MAX), a convex flag, and the shape table — 4 bytes each (material, ignored by trace ray, no
+/// collision, no response). The landscape keeps one stream per material and one shape per stream; objects may
+/// list fewer or none.
+pub struct Xnv { pub streams: Vec<(Vec<u8>, ([f32; 3], [f32; 3]))>, pub all: ([f32; 3], [f32; 3]), pub convex: u8, pub shapes: Vec<[u8; 4]> }
+
+/// The parts of a `.xnvmsh`; old plain files without the tail give the streams alone.
+pub fn parse_xnvmsh(d: &[u8]) -> Result<Xnv> {
+    let p0 = d.windows(4).position(|w| w == b"NXS\x01").ok_or_else(|| anyhow!("no PhysX stream"))?;
+    if p0 < 17 { bail!("PhysX stream at 0x{p0:x}"); }
+    let get = |at: usize, n: usize| d.get(at..at + n).ok_or_else(|| anyhow!("collision runs past the end"));
+    let u32_ = |at: usize| -> Result<u32> { Ok(u32::from_le_bytes(get(at, 4)?.try_into().unwrap())) };
+    let f = |at: usize| -> Result<f32> { Ok(f32::from_le_bytes(get(at, 4)?.try_into().unwrap())) };
+    let bx = |at: usize| -> Result<([f32; 3], [f32; 3])> { Ok(([f(at)?, f(at + 4)?, f(at + 8)?], [f(at + 12)?, f(at + 16)?, f(at + 20)?])) };
+    let n = u32_(p0 - 12)? as usize;
+    let mut p = p0 - 8;
+    let mut x = Xnv { streams: vec![], all: ([0.0; 3], [0.0; 3]), convex: d[p0 - 17], shapes: vec![] };
+    for _ in 0..n {
+        let len = u64::from_le_bytes(get(p, 8)?.try_into().unwrap()) as usize;
+        x.streams.push((get(p + 8, len)?.to_vec(), ([0.0; 3], [0.0; 3])));
+        p += 8 + len;
+    }
+    if d.get(p..p + 2) != Some(&30u16.to_le_bytes()[..]) { return Ok(x); }
+    x.all = bx(p + 6)?;
+    for i in 0..n { x.streams[i].1 = bx(p + 30 + 24 * i)?; }
+    let q = p + 30 + 24 * n;
+    x.convex = *d.get(q).ok_or_else(|| anyhow!("collision runs past the end"))?;
+    for i in 0..u32_(q + 1)? as usize { x.shapes.push(get(q + 5 + 4 * i, 4)?.try_into().unwrap()); }
+    Ok(x)
 }

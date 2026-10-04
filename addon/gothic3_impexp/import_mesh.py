@@ -3,7 +3,8 @@ collision.
 
 gothic3-core writes the mesh as OBJ + MTL + PNG into the cache (game axes mirrored in Z, centimetres; positions
 welded, every corner keeping its own uv and normal) and Blender's own OBJ importer brings it in. The collision
-(`<name>_COL.xnvmsh`), when the game has one, comes along as a wireframe child named `<name>_COL`.
+(`<name>_COL.xnvmsh`, or `<name>.xnvmsh` beside a landscape cell), when the game has one, comes along as a wireframe
+child named `<name>_COL`, one material per surface (`G3_Shape_<surface>`).
 """
 
 import os
@@ -38,6 +39,7 @@ def import_collision(name, scale, parent=None):
         return None, None
     col = obs[0]
     col.name = f"{name}_COL"
+    materials.setup_shape_materials(col)
     col.display_type = "WIRE"
     col.hide_render = True
     if parent is not None:
@@ -89,7 +91,7 @@ class G3_OT_import_mesh(bpy.types.Operator):
 class G3_OT_import_collision(bpy.types.Operator):
     bl_idname = "gothic3.import_collision"
     bl_label = "Gothic 3 Collision (.xnvmsh)"
-    bl_description = "Лише колізія моделі (<назва>_COL.xnvmsh) як каркасна сітка"
+    bl_description = "Лише колізія моделі як каркасна сітка, по матеріалу на поверхню (камінь, дерево, земля…)"
     bl_options = {"REGISTER", "UNDO"}
 
     category: EnumProperty(name="Категорія", items=catalog.enum_items(catalog.MESH_CATEGORIES))

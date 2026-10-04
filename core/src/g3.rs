@@ -96,7 +96,16 @@ fn skipped(name: &str) -> bool {
 
 impl G3Ctx {
     /// `root` = the Gothic 3 install folder (the one with `Data\`).
-    pub fn open(root: &Path) -> Result<Self> {
+    pub fn open(root: &Path) -> Result<Self> { Self::open_skipping(root, &[]) }
+
+    /// The game as it ships: without the volumes our installed mods live in (a re-export reads the meshes and
+    /// lightmaps it replaces, not its own last version).
+    pub fn open_original(root: &Path) -> Result<Self> {
+        let ours: Vec<String> = crate::mods::load(root).volumes.into_values().map(|v| v.to_lowercase()).collect();
+        Self::open_skipping(root, &ours)
+    }
+
+    fn open_skipping(root: &Path, skip: &[String]) -> Result<Self> {
         let dir = root.join("Data");
         let mut archives = vec![];
         for e in std::fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))?.flatten() {
@@ -104,7 +113,7 @@ impl G3Ctx {
             let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
             let ext = p.extension().map(|x| x.to_string_lossy().to_lowercase()).unwrap_or_default();
             let volume = ext == "pak" || (ext.len() == 3 && ext.starts_with('p') && ext[1..].chars().all(|c| c.is_ascii_digit()));
-            if volume && p.is_file() && !skipped(&name) { archives.push(p); }
+            if volume && p.is_file() && !skipped(&name) && !skip.contains(&name.to_lowercase()) { archives.push(p); }
         }
         let rank = |p: &PathBuf| { let e = p.extension().unwrap().to_string_lossy().to_lowercase(); if e == "pak" { -1 } else { e[1..].parse::<i32>().unwrap_or(0) } };
         archives.sort_by_key(|p| (p.with_extension("").to_string_lossy().to_lowercase(), rank(p)));

@@ -20,6 +20,8 @@ from . import core
 from .prefs import prefs
 
 SHAPE_MATERIALS = ("none", "wood", "metal", "water", "stone", "earth", "ice", "leather", "clay", "glass", "flesh", "snow", "debris", "foliage", "magic", "grass", "sand")
+# What the surfaces mean in the game (clay is what grass and forest floor use).
+SHAPE_HINTS = {"clay": "трава, лісова підстилка", "debris": "гравій, річкове каміння", "earth": "земля, стежки", "foliage": "солома, листя"}
 
 
 def _linked_image(socket):
@@ -54,6 +56,9 @@ def _image_png(img, tmp):
 
 def _material_spec(mat, tmp):
     spec = {"name": mat.name if mat else "Default", "diffuse": None, "normal": None}
+    shape = getattr(mat, "g3_shape", "auto") if mat else "auto"
+    if shape != "auto":
+        spec["shape"] = shape
     if mat and mat.use_nodes:
         bsdf = next((n for n in mat.node_tree.nodes if n.type == "BSDF_PRINCIPLED"), None)
         if bsdf:
@@ -159,10 +164,11 @@ class G3_OT_export_mesh(bpy.types.Operator):
     title: StringProperty(name="Назва мода", description="Підпис у INSTALL.bat і README")
     scale: FloatProperty(name="Масштаб", description="Як при імпорті: 0.01 = метри Blender", default=0.01, min=1e-6)
     collision: EnumProperty(name="Колізія", items=(
-        ("auto", "Так", "З об'єктів *_COL; нова модель без них — з самої моделі; замінена без них — колізія гри лишається"),
+        ("auto", "Так", "З об'єктів *_COL; без них — з самої моделі, якщо вона нова або це рельєф (його колізія = його трикутники); інакше колізія гри лишається"),
+        ("model", "З моделі", "Колізія з трикутників самої моделі, навіть якщо є *_COL чи колізія гри"),
         ("none", "Ні", "Лишити колізію гри як є (або без колізії)"),
     ), default="auto")
-    shape_material: EnumProperty(name="Поверхня", items=[(m, m, "") for m in SHAPE_MATERIALS], default="stone")
+    shape_material: EnumProperty(name="Поверхня (типово)", description="Для матеріалів, у яких поверхню не задано й не вгадано з назви (панель матеріалу → Gothic 3: поверхня)", items=[(m, m, SHAPE_HINTS.get(m, "")) for m in SHAPE_MATERIALS], default="stone")
 
     @classmethod
     def poll(cls, context):
@@ -213,14 +219,14 @@ class G3_OT_export_mesh(bpy.types.Operator):
             spec = os.path.join(tmp, "spec.json")
             doc = {"name": self.name, "geometry": geo, "corners": len(pos), "materials": materials}
             if self.collision != "none":
-                c = {"material": self.shape_material, "mode": "auto"}
+                c = {"material": self.shape_material, "mode": self.collision}
                 cg = gather(context, col_objects, self.scale, tmp) if col_objects else None
                 if cg is not None:
                     cgeo = os.path.join(tmp, "collision.bin")
                     with open(cgeo, "wb") as f:
                         for a in cg[:4]:
                             f.write(np.ascontiguousarray(a).tobytes())
-                    c.update(geometry=cgeo, corners=len(cg[0]))
+                    c.update(geometry=cgeo, corners=len(cg[0]), materials=cg[4])
                 doc["collision"] = c
             with open(spec, "w", encoding="utf-8") as f:
                 json.dump(doc, f)
@@ -242,6 +248,10 @@ class G3_OT_export_mesh(bpy.types.Operator):
             ui.refresh()
         if r.get("collision"):
             self.report({"INFO"}, f"колізія: {r['collision']}")
+        if r.get("lods"):
+            self.report({"INFO"}, f"разом з LOD: {', '.join(r['lods'])}")
+        if r.get("lightmaps"):
+            self.report({"INFO"}, f"освітлення перенесено на {r['lightmaps']} розміщень у світі")
         self.report({"INFO"}, f"{self.name} ({what}): {r['vertices']} вершин, {r['triangles']} трикутників → {where}")
         return {"FINISHED"}
 

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub const ARCHIVES: &[&str] = &["_compiledMesh", "_compiledMaterial", "_compiledImage", "_compiledPhysic", "_compiledAnimation"];
+pub const ARCHIVES: &[&str] = &["_compiledMesh", "_compiledMaterial", "_compiledImage", "_compiledPhysic", "_compiledAnimation", "Lightmaps"];
 
 #[derive(Serialize, Deserialize, Default)]
 pub struct Registry {

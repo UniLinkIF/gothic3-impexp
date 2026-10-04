@@ -11,16 +11,16 @@ Copyright (C) 2026 UniLinkIF. GPL-3.0-or-later with additional terms (section 7)
 bl_info = {
     "name": "Gothic 3 ImpExp",
     "author": "UniLinkIF",
-    "version": (0, 9, 1),
+    "version": (0, 9, 2),
     "blender": (5, 1, 0),
     "location": "File > Import / Export > Gothic 3",
     "description": "Import and export Gothic 3 models, characters, animations and collision",
     "category": "Import-Export",
 }
 
-from . import prefs, import_mesh, import_actor, export_mesh, export_motion, export_actor, rig, effects, ui, menus  # noqa: E402
+from . import prefs, materials, import_mesh, import_actor, export_mesh, export_motion, export_actor, rig, effects, ui, menus  # noqa: E402
 
-_modules = (prefs, import_mesh, import_actor, export_mesh, export_motion, export_actor, rig, effects, ui, menus)
+_modules = (prefs, materials, import_mesh, import_actor, export_mesh, export_motion, export_actor, rig, effects, ui, menus)
 
 
 def register():

@@ -18,13 +18,13 @@ Import and export **Gothic 3** (Piranha Bytes, 2006, Genome engine) models, char
 | Gothic 3 Model | `.xcmsh` + `.xshmat` + `.ximg` | mesh with textures (positions welded, uv/normal seams kept), alpha test/blend and specular set up, and its collision as a wireframe `<name>_COL` child. Categories: items, buildings, decor and furniture, plants, locations, landscape, water, technical |
 | Gothic 3 Character | `.xact` | armature (bones as sticks) and skinned mesh, no animation; a human body with the head of your choice (the Nameless Hero's by default). Categories: humans — body or head, animals and monsters, items and objects |
 | Gothic 3 Animations | `.xmot` | animations onto the selected Gothic 3 skeleton: one clip or a whole category — idle, movement, attacks, defence, dialogue and gestures, sitting and lying, interaction, death |
-| Gothic 3 Collision | `.xnvmsh` | only the collision, as a wireframe mesh |
+| Gothic 3 Collision | `.xnvmsh` | only the collision, as a wireframe mesh; one `G3_Shape_<surface>` material per surface (stone, wood, earth…). A landscape cell's collision is its own triangles |
 
 **File → Export** (install into the game, or build a mod package with `INSTALL.bat` / `ROLLBACK.bat`):
 
 | Entry | Writes |
 |---|---|
-| Gothic 3 Model → Mod | `.xcmsh` replacing the game's mesh of the same name or a new one, new materials (`.xshmat` from game templates: opaque, specular, alpha test) and images (`.ximg`), collision (`.xnvmsh`, from the `*_COL` objects or the model itself) |
+| Gothic 3 Model → Mod | `.xcmsh` replacing the game's mesh of the same name or a new one, new materials (`.xshmat` from game templates: opaque, specular, alpha test) and images (`.ximg`), collision (`.xnvmsh`, from the `*_COL` objects or the model itself; for the landscape always from the model) with surfaces by material. Replacing a game model takes its vertex colours and lighting (the lightmaps of all its placements in the world) from the nearest old vertices, and replaces its `_lod1` too |
 | Gothic 3 Motion → Mod | a `.xmot` replacing one of the game's clips (by default the one the action came from) or a new clip beside it; IK and other constraints go in as their result; frame effects (footsteps, sounds) from the action's list, edited in the Gothic 3 tab |
 | Gothic 3 Actor → Mod | a `.xact` — your mesh on a game skeleton (armour, bodies, heads, creatures with one mesh), weights from vertex groups |
 
@@ -40,7 +40,7 @@ pose.
 ## Install
 
 1. Blender 5.1 or newer.
-2. *Edit → Preferences → Get Extensions → ⌄ → Install from Disk…* → `gothic3_impexp-0.9.1.zip`.
+2. *Edit → Preferences → Get Extensions → ⌄ → Install from Disk…* → `gothic3_impexp-0.9.2.zip`.
 3. In the add-on's preferences check **Gothic 3 game folder** (the one with `Gothic3.exe`; the Steam default is
    filled in).
 
@@ -58,8 +58,10 @@ Installed mods live in `Gothic 3\gothic3_impexp\` (their files and a list) plus 
 
 ## Limits (0.9)
 
-- Meshes are written in the plain form (version-1 elements: positions, normals, one uv set, tangents); the extra arrays
-  of the game's own meshes (lightmap uvs, vertex colours) are not written.
+- Meshes are written as the game's (version-5 elements with vertex colours and a sphere tree) but without a second uv
+  set: a replaced model's lighting is written per vertex (as three in four of the game's lightmaps are), even where the
+  game had lightmap pages.
+- The far low-poly versions of the world (`*_lowpoly`, `G3_World_Landscape_Lowpoly_*`) are not replaced.
 - Collision streams follow the game's layout; the per-edge contact flags are computed by Risen's rule, not Gothic 3's.
 - A new motion takes a game clip as its template (its bones and structure); actors only replace (or sit beside) a
   one-mesh actor of the game.
@@ -67,6 +69,10 @@ Installed mods live in `Gothic 3\gothic3_impexp\` (their files and a list) plus 
 
 ## Notes
 
+- **Collision surface** (footstep sound): material panel → Gothic 3 → *Collision surface*. Auto takes it from the name: the
+  game's landscape materials have their own (grass and forest floor = clay, gravel = debris, paths = earth, rock = stone,
+  sand = sand), others by words in the name (wood, metal, stone…), the rest get the export dialog's default.
+- Importing several models that share a game material gives one shared material (no `.001`); the meshes stay separate.
 - Gothic 3 works in centimetres; the add-on imports at 0.01 (metres).
 - Patch volumes (`.p00`, `.p01`, … of the Community Patch) are read over the base archives, as the game does.
 - A motion track is relative to the nearest ancestor that has a track too; the helper bones in between

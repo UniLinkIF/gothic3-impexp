@@ -36,6 +36,7 @@ mod motion_write;
 mod nxs;
 mod geom;
 mod glb;
+mod lightmap;
 mod staticmesh;
 mod textures;
 mod volume;
@@ -145,7 +146,7 @@ fn run(args: &[String]) -> Result<serde_json::Value> {
             v
         }
         (Some("export"), Some(game)) => {
-            let g = open(game)?;
+            let g = g3::G3Ctx::open_original(Path::new(game))?;
             export::run(&g, Path::new(game), a(3).context("spec.json")?, a(4).unwrap_or("install"), a(5).context("mod name or package folder")?, a(6).unwrap_or(""))?
         }
         (Some("export-motion"), Some(game)) => {
