@@ -13,4 +13,4 @@ license = ["SPDX:GPL-3.0-or-later"]
 tags = ["Import-Export"]
 
 [permissions]
-files = "Reads the Gothic 3 game archives and installs mods as patch volumes"
+files = "Reads Gothic 3 archives and installs mods as patch volumes"
