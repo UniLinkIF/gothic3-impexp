@@ -190,7 +190,7 @@ pub fn build(name: &str, a: &G3Actor, motions: &[(String, G3Motion)], tex: &mut 
             };
             prims.push(json!({ "attributes": { "POSITION": a_pos, "NORMAL": a_nrm, "TEXCOORD_0": a_uv, "JOINTS_0": a_j, "WEIGHTS_0": a_w }, "indices": a_i, "material": mi }));
         }
-        let mesh_name = a.nodes.get(m.node).map(|n| n.name.clone()).unwrap_or_else(|| format!("{name}_Mesh"));
+        let mesh_name = m.label.clone().unwrap_or_else(|| a.nodes.get(m.node).map(|n| n.name.clone()).unwrap_or_else(|| format!("{name}_Mesh")));
         meshes.push(json!({ "name": mesh_name, "primitives": prims }));
     }
 

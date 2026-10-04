@@ -14,6 +14,8 @@
 //!                                                           a model from Blender into the game or a mod package
 //! gothic3-core export-motion <game> <clip> <glb> install <mod> | package <folder> <title>
 //!                                                           a game clip replaced by the animation in the glb
+//! gothic3-core export-actor <game> <spec.json> install <mod> | package <folder> <title>
+//!                                                           a skinned mesh on a game actor's skeleton
 //! gothic3-core installed <game>                             mods installed from Blender
 //! gothic3-core uninstall <game> <mod>                       remove one
 //! ```
@@ -34,6 +36,7 @@ mod glb;
 mod staticmesh;
 mod textures;
 mod volume;
+mod xact_write;
 mod xcmsh_write;
 
 use anyhow::{bail, Context, Result};
@@ -66,7 +69,7 @@ fn clips_for(g: &g3::G3Ctx, actor: &str, words: &str, limit: usize) -> Result<Ve
 
 /// Put `head`'s meshes on `body`: head bones map to the body's by name (the rigs share them); a head bone the
 /// body lacks maps to the body's head bone. Returns notes on what did not map.
-fn attach(body: &mut g3_actor::G3Actor, head: &g3_actor::G3Actor) -> Vec<String> {
+fn attach(body: &mut g3_actor::G3Actor, head: &g3_actor::G3Actor, head_name: &str) -> Vec<String> {
     let find = |n: &str| body.nodes.iter().position(|b| b.name.eq_ignore_ascii_case(n));
     let fallback = body.nodes.iter().position(|b| { let l = b.name.to_lowercase(); l.ends_with("_head") || l.contains("head_head") }).unwrap_or(0);
     let mut missing = std::collections::BTreeSet::new();
@@ -75,6 +78,7 @@ fn attach(body: &mut g3_actor::G3Actor, head: &g3_actor::G3Actor) -> Vec<String>
     body.materials.extend(head.materials.iter().cloned());
     for m in &head.meshes {
         let mut m = m.clone();
+        m.label = Some(head_name.to_string());
         m.node = map.get(m.node).copied().unwrap_or(fallback);
         for w in m.weights.iter_mut().flatten() { w.0 = map.get(w.0 as usize).copied().unwrap_or(fallback) as u16; }
         for t in m.tri_material.iter_mut() { *t += base; }
@@ -112,7 +116,7 @@ fn run(args: &[String]) -> Result<serde_json::Value> {
             if let Some(h) = a(8).filter(|h| !h.is_empty() && *h != "-") {
                 let hk = g.find("_compiledanimation", &format!("{}.xact", h.trim_end_matches(".xact"))).with_context(|| format!("{h}: no such head in Gothic 3"))?;
                 let head = g3_actor::decode_xact(&g.read(&hk)?).with_context(|| format!("decode {hk}"))?;
-                head_note = Some(attach(&mut actor, &head));
+                head_note = Some(attach(&mut actor, &head, &stem(g.path_of(&hk).unwrap_or(&hk))));
             }
             let names: Vec<String> = if query.is_empty() { vec![] } else if let Some(f) = query.strip_prefix('@') {
                 std::fs::read_to_string(f).unwrap_or_default().lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).take(limit).collect()
@@ -149,6 +153,18 @@ fn run(args: &[String]) -> Result<serde_json::Value> {
             match a(5).unwrap_or("install") {
                 "install" => { out["volumes"] = serde_json::json!(mods::install(Path::new(game), a(6).context("mod name")?, &[file])?); }
                 "package" => { mods::package(Path::new(a(6).context("package folder")?), a(7).unwrap_or(""), &[file])?; }
+                m => bail!("mode {m}: install or package"),
+            }
+            out
+        }
+        (Some("export-actor"), Some(game)) => {
+            let g = open(game)?;
+            let spec: xact_write::ActorSpec = serde_json::from_str(&std::fs::read_to_string(a(3).context("spec.json")?)?).context("actor spec")?;
+            let (report, files) = xact_write::build(&g, &spec)?;
+            let mut out = serde_json::json!({ "report": report });
+            match a(4).unwrap_or("install") {
+                "install" => { out["volumes"] = serde_json::json!(mods::install(Path::new(game), a(5).context("mod name")?, &files)?); }
+                "package" => { mods::package(Path::new(a(5).context("package folder")?), a(6).unwrap_or(""), &files)?; }
                 m => bail!("mode {m}: install or package"),
             }
             out

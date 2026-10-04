@@ -58,6 +58,11 @@ def import_character(name, clips="", limit=40, head="-"):
             arm.animation_data.action = acts[0]
     for a in acts:
         a.use_fake_user = True
+    # Which actor each mesh belongs to: an attached head is its own (named after it), the rest the body.
+    for o in obs:
+        if o.type == "MESH":
+            n = o.name.split(".")[0]
+            o["g3_base"] = n if n.lower().startswith("g3_head_") else name
     return out, arm, acts
 
 

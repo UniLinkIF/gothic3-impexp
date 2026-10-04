@@ -13,6 +13,7 @@ IMPORTS = (
 EXPORTS = (
     "gothic3.export_mesh",
     "gothic3.export_motion",
+    "gothic3.export_actor",
 )
 
 

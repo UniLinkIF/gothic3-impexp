@@ -61,6 +61,7 @@ class G3_PT_main(bpy.types.Panel):
         col.separator()
         col.operator("gothic3.export_mesh", icon="EXPORT")
         col.operator("gothic3.export_motion", icon="ACTION")
+        col.operator("gothic3.export_actor", icon="OUTLINER_OB_ARMATURE")
         from . import rig
         rig.draw_panel(self.layout, context)
         box = self.layout.box()

@@ -35,6 +35,8 @@ pub struct G3SkinMesh {
     pub tri_material: Vec<u32>,
     /// Per original vertex: (node, weight).
     pub weights: Vec<Vec<(u16, f32)>>,
+    /// Set when the mesh came from another actor (a head put on a body): that actor's name.
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
