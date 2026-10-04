@@ -199,7 +199,7 @@ fn downsample_half(rgba: &[u8], width: u32, height: u32) -> (u32, u32, Vec<u8>) 
     (nw, nh, out)
 }
 
-fn build_mip_chain(rgba: &[u8], width: u32, height: u32) -> Vec<(u32, u32, Vec<u8>)> {
+pub fn build_mip_chain(rgba: &[u8], width: u32, height: u32) -> Vec<(u32, u32, Vec<u8>)> {
     let mut levels = vec![(width, height, rgba.to_vec())];
     loop {
         let &(w, h, ref data) = levels.last().unwrap();

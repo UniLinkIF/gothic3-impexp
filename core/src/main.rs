@@ -12,15 +12,20 @@
 //! gothic3-core clips <game> <actor> [words] [limit]         clips that fit the actor
 //! ```
 
+mod cook;
 mod dds;
 mod g3;
 mod g3_actor;
 mod g3_motion;
 mod g3_res;
+mod g3_write;
+mod nxs;
 mod geom;
 mod glb;
 mod staticmesh;
 mod textures;
+mod volume;
+mod xcmsh_write;
 
 use anyhow::{bail, Context, Result};
 use std::path::Path;
