@@ -11,7 +11,7 @@ Copyright (C) 2026 UniLinkIF. GPL-3.0-or-later with additional terms (section 7)
 bl_info = {
     "name": "Gothic 3 ImpExp",
     "author": "UniLinkIF",
-    "version": (0, 9, 3),
+    "version": (0, 9, 4),
     "blender": (5, 1, 0),
     "location": "File > Import / Export > Gothic 3",
     "description": "Import and export Gothic 3 models, characters, animations and collision",

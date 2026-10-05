@@ -141,7 +141,8 @@ pub fn collision_obj(g: &G3Ctx, name: &str, out: &Path) -> Result<serde_json::Va
                 let id = weld.len();
                 *weld.entry(p.map(f32::to_bits)).or_insert_with(|| { let _ = writeln!(obj, "v {} {} {}", p[0], p[1], -p[2]); id }) + 1
             }).collect();
-            let _ = writeln!(faces, "f {} {} {}", ids[0], ids[1], ids[2]);
+            // Collision turns the other way round from render meshes: swapped, its faces point out in Blender too.
+            let _ = writeln!(faces, "f {} {} {}", ids[0], ids[2], ids[1]);
             tris += 1;
         }
     }

@@ -262,6 +262,10 @@ pub fn build(g: &G3Ctx, spec: &Spec) -> Result<(Report, Vec<(String, String, Vec
         });
         p.triangles.push(tri);
     }
+    // Element (written part) of each material; the landscape's collision has one stream per element.
+    let n_mats = parts.len();
+    let used: Vec<usize> = (0..n_mats).filter(|&i| !parts[i].triangles.is_empty()).collect();
+    let element_of = |t: usize| -> u32 { let mi = (tri_mat[t] as usize).min(n_mats - 1); used.iter().position(|&u| u == mi).unwrap_or(0) as u32 };
     parts.retain(|p| !p.triangles.is_empty());
     r.vertices = parts.iter().map(|p| p.positions.len()).sum();
     r.triangles = spec.corners / 3;
@@ -301,37 +305,47 @@ pub fn build(g: &G3Ctx, spec: &Spec) -> Result<(Report, Vec<(String, String, Vec
             let game_col = crate::staticmesh::collision_key(g, &name);
             let beside = game_col.as_deref().is_some_and(|k| k.starts_with("_compiledmesh/"));
             // (corner positions, surface per triangle, where they came from)
-            let src: Option<(Vec<[f32; 3]>, Vec<u8>, &str)> = match (&c.geometry, c.corners) {
+            // (corner positions, surface per triangle, stream per triangle, where they came from)
+            let src: Option<(Vec<[f32; 3]>, Vec<u8>, Vec<u32>, &str)> = match (&c.geometry, c.corners) {
                 (Some(geo), Some(n)) if mode != "model" && !beside => {
                     let (cp, _, _, cm) = read_geometry(geo, n)?;
                     let shapes: Vec<u8> = c.materials.iter().map(|m| shape_of(m, default)).collect();
-                    let tri = cm.iter().map(|&i| shapes.get(i as usize).copied().unwrap_or(default)).collect();
-                    Some((cp, tri, "the *_COL objects"))
+                    let tri: Vec<u8> = cm.iter().map(|&i| shapes.get(i as usize).copied().unwrap_or(default)).collect();
+                    let group = tri.iter().map(|&s| s as u32).collect();
+                    Some((cp, tri, group, "the *_COL objects"))
                 }
                 _ if existing.is_none() || beside || mode == "model" => {
                     let shapes: Vec<u8> = spec.materials.iter().map(|m| shape_of(m, default)).collect();
-                    let tri = tri_mat.iter().map(|&i| shapes.get(i as usize).copied().unwrap_or(default)).collect();
-                    Some((pos.clone(), tri, "the model itself"))
+                    let tri: Vec<u8> = tri_mat.iter().map(|&i| shapes.get(i as usize).copied().unwrap_or(default)).collect();
+                    // The landscape: one stream per mesh element, in the mesh's order, as the game's cells have it (the game
+                    // drops a cell collision laid out otherwise); elsewhere one per surface.
+                    let group = if beside { (0..tri.len()).map(element_of).collect() } else { tri.iter().map(|&s| s as u32).collect() };
+                    Some((pos.clone(), tri, group, "the model itself"))
                 }
                 _ => None,
             };
             match src {
-                Some((cp, tri_shape, from)) => {
-                    let mut groups: Vec<(u8, Vec<[f32; 3]>, Vec<[u32; 3]>, HashMap<[u32; 3], u32>)> = vec![];
+                Some((cp, tri_shape, tri_group, from)) => {
+                    let mut groups: Vec<(u32, u8, Vec<[f32; 3]>, Vec<[u32; 3]>, HashMap<[u32; 3], u32>)> = vec![];
                     for (t, c3) in cp.chunks_exact(3).enumerate() {
-                        let s = tri_shape[t];
-                        let gi = match groups.iter().position(|x| x.0 == s) { Some(i) => i, None => { groups.push((s, vec![], vec![], HashMap::new())); groups.len() - 1 } };
+                        let (key, s) = (tri_group[t], tri_shape[t]);
+                        let gi = match groups.iter().position(|x| x.0 == key) { Some(i) => i, None => { groups.push((key, s, vec![], vec![], HashMap::new())); groups.len() - 1 } };
                         let gr = &mut groups[gi];
-                        let ids = [0, 1, 2].map(|k| *gr.3.entry(c3[k].map(f32::to_bits)).or_insert_with(|| { gr.1.push(c3[k]); gr.1.len() as u32 - 1 }));
-                        gr.2.push(ids);
+                        let ids = [0, 1, 2].map(|k| *gr.4.entry(c3[k].map(f32::to_bits)).or_insert_with(|| { gr.2.push(c3[k]); gr.2.len() as u32 - 1 }));
+                        // Gothic 3's collision turns the other way round from its render meshes (PhysX faces): swap 1 and 2.
+                        gr.3.push([ids[0], ids[2], ids[1]]);
                     }
-                    let meshes: Vec<(Vec<[f32; 3]>, Vec<[u32; 3]>, u8)> = groups.into_iter().map(|(s, v, t, _)| (v, t, s)).collect();
+                    groups.sort_by_key(|g| g.0);
+                    let meshes: Vec<(Vec<[f32; 3]>, Vec<[u32; 3]>, u8)> = groups.into_iter().map(|(_, s, v, t, _)| (v, t, s)).collect();
                     let (col_archive, col_path) = match &game_col {
                         Some(k) => (archive_of(k).to_string(), g.path_of(k).unwrap_or(k).to_string()),
                         None => ("_compiledPhysic".to_string(), format!("gothic3_impexp/{file_stem}_COL.xnvmsh")),
                     };
                     let summary: Vec<String> = meshes.iter().map(|(_, t, s)| format!("{} {}", g3_write::SHAPE_MATERIALS[*s as usize], t.len())).collect();
-                    files.push((col_archive, col_path, g3_write::xnvmsh(&meshes)?));
+                    // In the game's own file when it has one (its head and strings), else our plain form.
+                    let x = g3_write::xnv_of(&meshes, Some(&g.root))?;
+                    let bytes = match &game_col { Some(k) => g3_write::xnvmsh_in(&g.read(k)?, &x)?, None => g3_write::xnvmsh_write(&x) };
+                    files.push((col_archive, col_path, bytes));
                     r.collision = Some(format!("{} triangles from {from}: {}", cp.len() / 3, summary.join(", ")));
                 }
                 None => r.collision = Some("the game's own collision stays".into()),
@@ -359,7 +373,7 @@ mod tests {
     use super::*;
 
     /// A spec holding the game mesh `key` itself, as the add-on would send it.
-    fn spec_of(g: &G3Ctx, key: &str, dir: &Path, collision: &str) -> Spec {
+    pub fn spec_of(g: &G3Ctx, key: &str, dir: &Path, collision: &str) -> Spec {
         let m = crate::g3_res::decode_xcmsh(&g.read(key).unwrap()).unwrap();
         let geo = &m.geo;
         let (mut p, mut n, mut u, mut t) = (vec![], vec![], vec![], vec![]);
@@ -436,5 +450,51 @@ mod tests {
             let lm = crate::lightmap::parse(&f.2).unwrap();
             assert_eq!(lm.elements.len(), lm.count, "{}", f.1);
         }
+    }
+}
+
+#[cfg(test)]
+mod game_cook_tests {
+    use super::*;
+
+    /// The exported cell's collision is cooked by the game's library: every stream reads back with its
+    /// triangles, materials set like the game's own (flag 1), and the triangles are the model's.
+    #[test]
+    fn exported_collision_is_cooked_by_the_game() {
+        let Ok(root) = std::env::var("G3_GAME") else { return };
+        let g = G3Ctx::open_original(Path::new(&root)).unwrap();
+        let key = "_compiledmesh/g3_myrtana_landscape_01/lod/g3_myrtana_landscape_cell_238.xcmsh";
+        let (_, files) = build(&g, &tests::spec_of(&g, key, &std::env::temp_dir().join("g3ie_test_cook"), "model")).unwrap();
+        let col = files.iter().find(|f| f.1.to_lowercase().ends_with(".xnvmsh")).unwrap();
+        assert!(col.2.starts_with(b"GENOMFLE"), "in the game's own file");
+        let x = crate::g3_res::parse_xnvmsh(&col.2).unwrap();
+        let mut tris = 0;
+        for (st, _) in &x.streams {
+            let m = crate::nxs::read_trimesh(&mut crate::nxs::Reader { d: st, at: 0 }).unwrap();
+            assert_eq!(m.flags & 1, 1, "materials as the game cooks them");
+            tris += m.tris.len();
+        }
+        let game = crate::g3_res::decode_xcmsh(&g.read(key).unwrap()).unwrap();
+        assert_eq!(tris, game.geo.indices.len() / 3);
+    }
+}
+
+#[cfg(test)]
+mod winding_tests {
+    use super::*;
+
+    /// Up-facing ground: the game's cell collision has most triangles turned one way (opposite to its render
+    /// mesh); a cell exported from its own triangles must turn the same way.
+    #[test]
+    fn exported_collision_turns_like_the_games() {
+        let Ok(root) = std::env::var("G3_GAME") else { return };
+        let g = G3Ctx::open_original(Path::new(&root)).unwrap();
+        let key = "_compiledmesh/g3_myrtana_landscape_01/lod/g3_myrtana_landscape_cell_244.xcmsh";
+        let up = |t: &[[f32; 3]; 3]| { let (a, b, c) = (t[0], t[1], t[2]); (b[2] - a[2]) * (c[0] - a[0]) - (b[0] - a[0]) * (c[2] - a[2]) > 0.0 };
+        let game = crate::g3_res::xnvmsh_triangles(&g.read(&key.replace(".xcmsh", ".xnvmsh")).unwrap()).unwrap();
+        let (_, files) = build(&g, &tests::spec_of(&g, key, &std::env::temp_dir().join("g3ie_test_wind"), "auto")).unwrap();
+        let ours = crate::g3_res::xnvmsh_triangles(&files.iter().find(|f| f.1.to_lowercase().ends_with(".xnvmsh")).unwrap().2).unwrap();
+        let (gu, ou) = (game.iter().filter(|t| up(t)).count(), ours.iter().filter(|t| up(t)).count());
+        assert!(gu * 2 > game.len() && ou * 2 > ours.len(), "game {gu}/{}, ours {ou}/{}", game.len(), ours.len());
     }
 }

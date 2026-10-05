@@ -2,3 +2,4 @@ core/target/
 dist/
 __pycache__/
 *.pyc
+cook32/g3cook.exe

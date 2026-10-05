@@ -166,16 +166,65 @@ pub fn shape_index(name: &str) -> Option<u8> { SHAPE_MATERIALS.iter().position(|
 /// · per mesh: u8 shape material · u8 ignored by trace ray · u8 no collision · u8 no response
 /// ```
 /// The tail is the game's own byte for byte (see the test); a different one makes the game drop the collision.
-pub fn xnvmsh(meshes: &[(Vec<[f32; 3]>, Vec<[u32; 3]>, u8)]) -> Result<Vec<u8>> {
+pub fn xnvmsh(meshes: &[(Vec<[f32; 3]>, Vec<[u32; 3]>, u8)]) -> Result<Vec<u8>> { Ok(xnvmsh_write(&xnv_of(meshes, None)?)) }
+
+/// Cooked meshes, one per surface, by the game's own PhysX cooking library (`g3cook.exe` next to this program
+/// runs the 32-bit `NxCooking.dll` from the game folder `game`): the streams the game's PhysX reads. Our own
+/// cooker (`cook.rs`) is only used where no game is given (tests); Gothic 3 drops streams it did not cook.
+pub fn xnv_of(meshes: &[(Vec<[f32; 3]>, Vec<[u32; 3]>, u8)], game: Option<&std::path::Path>) -> Result<crate::g3_res::Xnv> {
     let mut x = crate::g3_res::Xnv { streams: vec![], all: EMPTY_BOX, convex: 0, shapes: vec![] };
-    for (verts, tris, mat) in meshes {
-        let m: Vec<[f32; 3]> = verts.iter().map(|v| v.map(|x| x / 100.0)).collect();
+    let streams = match game {
+        Some(g) => game_cook(g, meshes)?,
+        None => meshes.iter().map(|(v, t, _)| Ok(crate::nxs::write_trimesh(&crate::cook::cook(&v.iter().map(|p| p.map(|c| c / 100.0)).collect::<Vec<_>>(), t, &[])?))).collect::<Result<_>>()?,
+    };
+    for ((verts, _, mat), st) in meshes.iter().zip(streams) {
         let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
         for v in verts { for k in 0..3 { lo[k] = lo[k].min(v[k]); hi[k] = hi[k].max(v[k]); } }
-        x.streams.push((crate::nxs::write_trimesh(&crate::cook::cook(&m, tris, &[])?), (lo, hi)));
+        x.streams.push((st, (lo, hi)));
         x.shapes.push([*mat, 0, 0, 0]);
     }
-    Ok(xnvmsh_write(&x))
+    Ok(x)
+}
+
+/// The meshes (cm) cooked by `g3cook.exe` with the game's `NxCooking.dll`; every triangle gets material 1, as in
+/// the game's own streams.
+fn game_cook(game: &std::path::Path, meshes: &[(Vec<[f32; 3]>, Vec<[u32; 3]>, u8)]) -> Result<Vec<Vec<u8>>> {
+    // Next to gothic3-core.exe in the add-on; in a development checkout, the built helper in cook32/.
+    let here = std::env::current_exe()?;
+    let exe = [here.with_file_name("g3cook.exe"), std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("cook32").join("g3cook.exe")]
+        .into_iter().find(|p| p.is_file()).context("g3cook.exe is missing next to gothic3-core.exe — reinstall the add-on")?;
+    if !game.join("NxCooking.dll").is_file() { bail!("NxCooking.dll is not in the game folder {}", game.display()); }
+    static RUN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let dir = std::env::temp_dir().join(format!("g3ie_cook_{}_{}", std::process::id(), RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    std::fs::create_dir_all(&dir)?;
+    let (inp, out) = (dir.join("in.bin"), dir.join("out.bin"));
+    let mut b = (meshes.len() as u32).to_le_bytes().to_vec();
+    for (verts, tris, _) in meshes {
+        b.extend((verts.len() as u32).to_le_bytes());
+        b.extend((tris.len() as u32).to_le_bytes());
+        for v in verts { for c in v { b.extend((c / 100.0).to_le_bytes()); } }
+        for t in tris { for c in t { b.extend(c.to_le_bytes()); } }
+        for _ in tris { b.extend(1u16.to_le_bytes()); }
+    }
+    std::fs::write(&inp, b)?;
+    #[cfg(windows)] use std::os::windows::process::CommandExt;
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg(game).arg(&inp).arg(&out);
+    #[cfg(windows)] cmd.creation_flags(0x0800_0000);
+    let r = cmd.output().context("run g3cook.exe")?;
+    if !r.status.success() { bail!("the game's PhysX cooking failed: {}", String::from_utf8_lossy(&r.stderr).trim()); }
+    let d = std::fs::read(&out)?;
+    let _ = std::fs::remove_dir_all(&dir);
+    let n = u32::from_le_bytes(d[0..4].try_into().unwrap()) as usize;
+    if n != meshes.len() { bail!("g3cook returned {n} streams for {} meshes", meshes.len()); }
+    let mut o = 4;
+    let mut v = vec![];
+    for _ in 0..n {
+        let l = u32::from_le_bytes(d.get(o..o + 4).context("g3cook output")?.try_into().unwrap()) as usize;
+        v.push(d.get(o + 4..o + 4 + l).context("g3cook output")?.to_vec());
+        o += 4 + l;
+    }
+    Ok(v)
 }
 
 /// The box of all meshes as the game mostly writes it: empty.
@@ -196,6 +245,21 @@ pub fn xnvmsh_write(x: &crate::g3_res::Xnv) -> Vec<u8> {
     let rest = (o.len() - size_at - 4) as u32;
     o[size_at..size_at + 4].copy_from_slice(&rest.to_le_bytes());
     o
+}
+
+/// `x` in the game's own file `template` (GENOMFLE): its head and string table, our streams and tail.
+pub fn xnvmsh_in(template: &[u8], x: &crate::g3_res::Xnv) -> Result<Vec<u8>> {
+    if !template.starts_with(b"GENOMFLE") { bail!("collision template is not GENOMFLE"); }
+    let p0 = template.windows(4).position(|w| w == b"NXS\x01").context("collision template has no stream")?;
+    let tab = u32::from_le_bytes(template[10..14].try_into().unwrap()) as usize;
+    let mut o = template[..p0 - 12].to_vec();
+    o[p0 - 17] = x.convex;
+    o.extend(xnvmsh_body(x));
+    let new_tab = o.len() as u32;
+    o.extend(&template[tab..]);
+    o[10..14].copy_from_slice(&new_tab.to_le_bytes());
+    o[29..33].copy_from_slice(&(new_tab - 33).to_le_bytes());
+    Ok(o)
 }
 
 /// From the stream count to the end: streams, then the tail.
@@ -244,6 +308,7 @@ mod collision_game_tests {
             let meshes = crate::g3_res::parse_xnvmsh(&d).unwrap();
             let x = meshes;
             let tab = u32::from_le_bytes(d[10..14].try_into().unwrap()) as usize;
+            assert_eq!(super::xnvmsh_in(&d, &x).unwrap(), d, "{k}: in its own file");
             let (a, b) = (super::xnvmsh_body(&x), &d[p0 - 12..tab]);
             if let Some(i) = (0..a.len().min(b.len())).find(|&i| a[i] != b[i]).or((a.len() != b.len()).then(|| a.len().min(b.len()))) { panic!("{k}: differs at {i} of {}/{}: ours {:?} game {:?}", a.len(), b.len(), &a[i.saturating_sub(8)..(i + 24).min(a.len())], &b[i.saturating_sub(8)..(i + 24).min(b.len())]); }
             n += 1;
