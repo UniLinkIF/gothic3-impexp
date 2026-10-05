@@ -14,10 +14,9 @@
 //! model    "OPC\x01" u32 0 · u32 code (4 = single leaf, 3 = quantized no-leaf tree)
 //!          · [u32 nodes · nodes × 20 bytes · f32 centre coeff[3] · f32 extents coeff[3]]
 //!          · "HBM\x01" u32 0 · u32 leaves · [u32 max · leaf[leaves] (u8/u16/u32 by max)] · u32 0
-//! node     i16 centre[3] · u16 extents[3] (× the coefficients) · u32 a · u32 b
-//!          a = 0xDEAD: the first child is the next node; else bit 31: the first child is leaf
-//!          (a & 0x3FFFFFFF), bit 30: the second child is the leaf after it.
-//!          b = number of nodes below this one (so the second child node sits at i + 1 + size of the first).
+//! node     i16 centre[3] · u16 extents[3] (× the coefficients) · u32 child · u32 child
+//!          even: the child node's byte offset in the node array (index × 20); odd: leaf (word >> 1).
+//!          (Risen's PhysX 2.8 writes 0xDEAD / subtree sizes here instead; Gothic 3 reads such a tree as garbage.)
 //! leaf     triangle index << 4 | (count − 1); leaves cover the (remapped) triangles in order.
 //! ```
 

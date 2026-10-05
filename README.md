@@ -40,7 +40,7 @@ pose.
 ## Install
 
 1. Blender 5.1 or newer.
-2. *Edit → Preferences → Get Extensions → ⌄ → Install from Disk…* → `gothic3_impexp-0.9.2.zip`.
+2. *Edit → Preferences → Get Extensions → ⌄ → Install from Disk…* → `gothic3_impexp-0.9.3.zip`.
 3. In the add-on's preferences check **Gothic 3 game folder** (the one with `Gothic3.exe`; the Steam default is
    filled in).
 
@@ -62,7 +62,8 @@ Installed mods live in `Gothic 3\gothic3_impexp\` (their files and a list) plus 
   set: a replaced model's lighting is written per vertex (as three in four of the game's lightmaps are), even where the
   game had lightmap pages.
 - The far low-poly versions of the world (`*_lowpoly`, `G3_World_Landscape_Lowpoly_*`) are not replaced.
-- Collision streams follow the game's layout; the per-edge contact flags are computed by Risen's rule, not Gothic 3's.
+- Collision is cooked by Gothic 3's rules (collision tree and convex-edge flags as the game's); the vertex flags (contact
+  smoothing) are set more simply than the game does.
 - A new motion takes a game clip as its template (its bones and structure); actors only replace (or sit beside) a
   one-mesh actor of the game.
 - A new model or actor shows up in the game only once something places or references it.

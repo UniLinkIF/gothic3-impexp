@@ -4,7 +4,8 @@
 //!
 //! * vertices welded and unused ones dropped; indices 16-bit (32 past 65536 vertices);
 //! * an AABB tree with at most 8 triangles per leaf (a single leaf up to 8 triangles), triangles
-//!   reordered leaf by leaf, `remap` = new → original;
+//!   reordered leaf by leaf, `remap` = new → original; a node's two child words are, as Gothic 3 (PhysX 2.5) has them,
+//!   the child node's byte offset (index × 20) or a leaf (index << 1 | 1) — not Risen's 0xDEAD / subtree-size form;
 //! * nodes quantised exactly like the engine: coefficient = 1 / (32767 / max |centre| or max extent),
 //!   centres truncated, extents truncated then grown until the box contains the real one;
 //! * convex parts = regions grown across non-concave edges; flat parts = coplanar groups numbered
@@ -230,6 +231,9 @@ pub fn cook(in_verts: &[V3], in_tris: &[[u32; 3]], materials: &[u16]) -> Result<
         let (nodes, coeffs) = quantize(&boxes, &flat);
         model.nodes = nodes;
         model.coeffs = coeffs;
+        // Gothic 3's PhysX 2.5 tree: a child word is a node's byte offset (index × 20, even) or a leaf (index << 1 | 1).
+        let word = |c: &Child| match c { Child::Node(j) => (*j * 20) as u32, Child::Leaf(l) => ((*l as u32) << 1) | 1 };
+        for (n, c) in model.nodes.iter_mut().zip(&ch) { n.a = word(&c[0]); n.b = word(&c[1]); }
         model
     };
 
@@ -308,5 +312,63 @@ mod tests {
         eprintln!("{n} streams ({bad} unread): same vertices and box {same}, same tree {same_tree}, same mass {same_mass}, edge flags {:.2}%", edge_ok as f64 * 100.0 / edge_tot.max(1) as f64);
         let mut h: Vec<_> = hist.into_iter().collect(); h.sort_by(|a, b| b.1.cmp(&a.1)); eprintln!("EDGES (game, ours): {:?}", &h[..h.len().min(12)]);
         assert!(n > 50);
+    }
+}
+
+#[cfg(test)]
+mod tree_tests {
+    use super::*;
+
+    /// Read with Gothic 3's child words: (nodes whose box misses one of its triangles, triangles reached once, all).
+    fn check(m: &TriMesh) -> (usize, usize, usize) {
+        if m.model.code == 4 { return (0, m.tris.len(), m.tris.len()); }
+        let nodes = &m.model.nodes;
+        let c = m.model.coeffs;
+        fn under(w: u32, nodes: &[Node], leaves: &[u32], out: &mut Vec<usize>, depth: usize) {
+            if depth > 64 { return; }
+            if w & 1 == 1 {
+                if let Some(&l) = leaves.get((w >> 1) as usize) { let s = (l >> 4) as usize; out.extend(s..s + (l & 15) as usize + 1); }
+            } else if let Some(n) = nodes.get(w as usize / 20) {
+                under(n.a, nodes, leaves, out, depth + 1);
+                under(n.b, nodes, leaves, out, depth + 1);
+            }
+        }
+        let mut bad = 0;
+        for (i, n) in nodes.iter().enumerate() {
+            let mut ts = vec![];
+            under((i * 20) as u32, nodes, &m.model.leaves, &mut ts, 0);
+            let inside = ts.iter().all(|&t| t < m.tris.len() && m.tris[t].iter().all(|&v| { let p = m.verts[v as usize]; (0..3).all(|k| (p[k] - n.center[k] as f32 * c[k]).abs() <= n.extents[k] as f32 * c[3 + k] + 1e-3) }));
+            if !inside { bad += 1; }
+        }
+        let mut all = vec![];
+        under(0, nodes, &m.model.leaves, &mut all, 0);
+        let n = all.len();
+        all.sort();
+        all.dedup();
+        (bad, if all.len() == n { n } else { 0 }, m.tris.len())
+    }
+
+    /// The game's own trees hold every triangle under these rules, and so do ours cooked from the same triangles.
+    #[test]
+    fn trees_are_read_the_way_gothic3_reads_them() {
+        let Ok(root) = std::env::var("G3_GAME") else { return };
+        let g = crate::g3::G3Ctx::open(std::path::Path::new(&root)).unwrap();
+        let (mut game_ok, mut ours_ok, mut n) = (0, 0, 0);
+        for k in g.keys().into_iter().filter(|k| k.ends_with(".xnvmsh")).step_by(11) {
+            let Ok(x) = crate::g3_res::parse_xnvmsh(&g.read(&k).unwrap()) else { continue };
+            for (st, _) in &x.streams {
+                let Ok(m) = nxs::read_trimesh(&mut nxs::Reader { d: st, at: 0 }) else { continue };
+                if m.model.code != 3 { continue; }
+                n += 1;
+                let (bad, reached, all) = check(&m);
+                if bad == 0 && reached == all { game_ok += 1; }
+                let ours = cook(&m.verts, &m.tris, &[]).unwrap();
+                let (bad, reached, all) = check(&ours);
+                assert!(bad == 0 && reached == all, "{k}: ours {bad} bad nodes, {reached} of {all} triangles");
+                ours_ok += 1;
+            }
+        }
+        assert!(n > 100 && game_ok == n, "game trees valid: {game_ok} of {n}");
+        assert_eq!(ours_ok, n);
     }
 }
