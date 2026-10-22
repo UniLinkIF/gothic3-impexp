@@ -6,8 +6,8 @@ Import and export **Gothic 3** (Piranha Bytes, 2006, Genome engine) models, char
 **Blender 5.1+**, straight from and back into the game's archives.
 
 > **Status: 0.9 beta.** Everything the add-on writes is checked against the game's own files and read back through
-> the game's archive lookup, but it has not yet been played through in the game. Keep your game backed up and report
-> what you find.
+> the game's archive lookup; replaced models, landscape and their collision have been tried in the game. Keep your game
+> backed up and report what you find.
 
 ## What it does
 
@@ -40,7 +40,7 @@ pose.
 ## Install
 
 1. Blender 5.1 or newer.
-2. *Edit → Preferences → Get Extensions → ⌄ → Install from Disk…* → `gothic3_impexp-0.9.4.zip`.
+2. *Edit → Preferences → Get Extensions → ⌄ → Install from Disk…* → `gothic3_impexp-0.9.5.zip`.
 3. In the add-on's preferences check **Gothic 3 game folder** (the one with `Gothic3.exe`; the Steam default is
    filled in).
 
@@ -63,8 +63,13 @@ Installed mods live in `Gothic 3\gothic3_impexp\` (their files and a list) plus 
   game had lightmap pages.
 - The far low-poly versions of the world (`*_lowpoly`, `G3_World_Landscape_Lowpoly_*`) are not replaced.
 - Collision is cooked by the game's own PhysX library (`NxCooking.dll` from the Gothic 3 folder; the add-on does not ship
-  it) through a 32-bit helper, `g3cook.exe`. A landscape cell's collision has one part per mesh material, in the mesh's
-  order (the game drops it otherwise), and its triangles turn the other way round from the mesh, as the game's do.
+  it) through a 32-bit helper, `g3cook.exe`. Its triangles turn the other way round from the mesh, as the game's do.
+- The world's objects name each part of a collision by its number in the file and give it their own surface. So a
+  collision that replaces the game's keeps the game's parts in the game's order: a landscape cell's are its mesh
+  materials, an object's its surfaces (the water mill: stone, then wood). A surface the game's collision of that model
+  does not have goes with its first part (the export says so), and a part that would stay empty keeps one triangle.
+  The world also keeps each part's old box: the export warns when a part grows well past it.
+- Small items keep the game's convex physics shape (`*_CV`): only triangle-mesh collision is written.
 - A new motion takes a game clip as its template (its bones and structure); actors only replace (or sit beside) a
   one-mesh actor of the game.
 - A new model or actor shows up in the game only once something places or references it.

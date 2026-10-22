@@ -9,7 +9,8 @@
 //!   placed instance) is written again for the new vertices the same way.
 //! * A material whose name the game has is used as it is; another one becomes `<name>.xshmat` from a template
 //!   (opaque, opaque with specular, alpha test), its images `<name>_Diffuse_01` / `_Normal_01` / `_Specular_01`.
-//! * Collision, one cooked mesh per surface (shape material): the model itself when the game's collision is the
+//! * Collision, one cooked mesh (part) per surface — or, replacing the game's, the game's parts in the game's order,
+//!   since the world's entities name each part by its index with a surface of their own: the model itself when the game's collision is the
 //!   model's own triangles (the landscape: `<name>.xnvmsh` beside the mesh; an imported `*_COL` of it is only a
 //!   view), when it is new without `*_COL` objects, or when asked (`mode: model`); else the `*_COL` objects; else
 //!   the game's collision stays. A surface comes from the Blender
@@ -262,10 +263,6 @@ pub fn build(g: &G3Ctx, spec: &Spec) -> Result<(Report, Vec<(String, String, Vec
         });
         p.triangles.push(tri);
     }
-    // Element (written part) of each material; the landscape's collision has one stream per element.
-    let n_mats = parts.len();
-    let used: Vec<usize> = (0..n_mats).filter(|&i| !parts[i].triangles.is_empty()).collect();
-    let element_of = |t: usize| -> u32 { let mi = (tri_mat[t] as usize).min(n_mats - 1); used.iter().position(|&u| u == mi).unwrap_or(0) as u32 };
     parts.retain(|p| !p.triangles.is_empty());
     r.vertices = parts.iter().map(|p| p.positions.len()).sum();
     r.triangles = spec.corners / 3;
@@ -304,28 +301,53 @@ pub fn build(g: &G3Ctx, spec: &Spec) -> Result<(Report, Vec<(String, String, Vec
             let default = c.material.as_deref().and_then(g3_write::shape_index).unwrap_or(4);
             let game_col = crate::staticmesh::collision_key(g, &name);
             let beside = game_col.as_deref().is_some_and(|k| k.starts_with("_compiledmesh/"));
-            // (corner positions, surface per triangle, where they came from)
-            // (corner positions, surface per triangle, stream per triangle, where they came from)
-            let src: Option<(Vec<[f32; 3]>, Vec<u8>, Vec<u32>, &str)> = match (&c.geometry, c.corners) {
+            // (corner positions, surface per triangle, material name per triangle, where they came from)
+            let src: Option<(Vec<[f32; 3]>, Vec<u8>, Vec<String>, &str)> = match (&c.geometry, c.corners) {
                 (Some(geo), Some(n)) if mode != "model" && !beside => {
                     let (cp, _, _, cm) = read_geometry(geo, n)?;
                     let shapes: Vec<u8> = c.materials.iter().map(|m| shape_of(m, default)).collect();
                     let tri: Vec<u8> = cm.iter().map(|&i| shapes.get(i as usize).copied().unwrap_or(default)).collect();
-                    let group = tri.iter().map(|&s| s as u32).collect();
-                    Some((cp, tri, group, "the *_COL objects"))
+                    let names = cm.iter().map(|&i| c.materials.get(i as usize).map(|m| clean(&m.name).to_lowercase()).unwrap_or_default()).collect();
+                    Some((cp, tri, names, "the *_COL objects"))
                 }
                 _ if existing.is_none() || beside || mode == "model" => {
                     let shapes: Vec<u8> = spec.materials.iter().map(|m| shape_of(m, default)).collect();
                     let tri: Vec<u8> = tri_mat.iter().map(|&i| shapes.get(i as usize).copied().unwrap_or(default)).collect();
-                    // The landscape: one stream per mesh element, in the mesh's order, as the game's cells have it (the game
-                    // drops a cell collision laid out otherwise); elsewhere one per surface.
-                    let group = if beside { (0..tri.len()).map(element_of).collect() } else { tri.iter().map(|&s| s as u32).collect() };
-                    Some((pos.clone(), tri, group, "the model itself"))
+                    let names = tri_mat.iter().map(|&i| spec.materials.get(i as usize).map(|m| clean(&m.name).to_lowercase()).unwrap_or_default()).collect();
+                    Some((pos.clone(), tri, names, "the model itself"))
                 }
                 _ => None,
             };
             match src {
-                Some((cp, tri_shape, tri_group, from)) => {
+                Some((cp, tri_shape, tri_name, from)) => {
+                    // The parts (cooked meshes) of the collision. The world's entities name each part of the game's
+                    // collision by its index in the file, with their own surface (`eCCollisionShape`: file, resource
+                    // index, material): a part past the game's count is never loaded, and a part moved to another
+                    // index gets that index's surface. So a collision replacing the game's keeps its parts in its
+                    // order — a landscape cell's are its mesh's elements, an object's its surfaces — and what fits
+                    // none goes with the first. A new one has a part per surface.
+                    let game_x = match &game_col { Some(k) => Some(crate::g3_res::parse_xnvmsh(&g.read(k)?).with_context(|| format!("{k}: the collision it replaces"))?), None => None };
+                    let tri_group: Vec<u32> = match &game_x {
+                        Some(gx) => {
+                            let part_shape: Vec<Option<u8>> = (0..gx.streams.len()).map(|i| gx.shapes.get(i).map(|s| s[0])).collect();
+                            // A landscape cell's parts are its game mesh's elements, in order.
+                            let part_name: Vec<String> = match (&existing, beside) {
+                                (Some(k), true) => crate::g3_res::decode_xcmsh(&g.read(k)?)?.geo.submeshes.iter().map(|s| clean(s.material.trim_end_matches(".xshmat")).to_lowercase()).collect(),
+                                _ => vec![],
+                            };
+                            let mut lost: Vec<u8> = vec![];
+                            let group = tri_shape.iter().zip(&tri_name).map(|(&s, n)| {
+                                let i = part_name.iter().take(part_shape.len()).position(|p| p == n)
+                                    .or_else(|| part_shape.iter().position(|&p| p == Some(s)))
+                                    .unwrap_or_else(|| { if !lost.contains(&s) { lost.push(s); } 0 });
+                                i as u32
+                            }).collect();
+                            let first = part_shape[0].map_or("its first part", |p| g3_write::SHAPE_MATERIALS[p as usize]);
+                            for s in lost { r.warnings.push(format!("collision: the game's collision of this model has no {} part — it goes with the first ({first}); the world gives each part its own surface", g3_write::SHAPE_MATERIALS[s as usize])); }
+                            group
+                        }
+                        None => tri_shape.iter().map(|&s| s as u32).collect(),
+                    };
                     let mut groups: Vec<(u32, u8, Vec<[f32; 3]>, Vec<[u32; 3]>, HashMap<[u32; 3], u32>)> = vec![];
                     for (t, c3) in cp.chunks_exact(3).enumerate() {
                         let (key, s) = (tri_group[t], tri_shape[t]);
@@ -335,6 +357,21 @@ pub fn build(g: &G3Ctx, spec: &Spec) -> Result<(Report, Vec<(String, String, Vec
                         // Gothic 3's collision turns the other way round from its render meshes (PhysX faces): swap 1 and 2.
                         gr.3.push([ids[0], ids[2], ids[1]]);
                     }
+                    if let Some(gx) = &game_x {
+                        // Every part the world refers to, with the game's surface; one left empty holds a copy of a
+                        // triangle of another (a part cannot be empty, and a missing one drops the whole collision).
+                        let any = groups.first().map(|g| (g.2.clone(), g.3[0]));
+                        for i in 0..gx.streams.len() as u32 {
+                            let s = gx.shapes.get(i as usize).map_or(default, |s| s[0]);
+                            match groups.iter_mut().find(|g| g.0 == i) {
+                                Some(gr) => gr.1 = s,
+                                None => if let Some((v, t)) = &any {
+                                    groups.push((i, s, t.map(|k| v[k as usize]).to_vec(), vec![[0, 1, 2]], HashMap::new()));
+                                    r.warnings.push(format!("collision: nothing of the model is {} — that part of the game's collision is left as a single triangle", g3_write::SHAPE_MATERIALS[s as usize]));
+                                },
+                            }
+                        }
+                    }
                     groups.sort_by_key(|g| g.0);
                     let meshes: Vec<(Vec<[f32; 3]>, Vec<[u32; 3]>, u8)> = groups.into_iter().map(|(_, s, v, t, _)| (v, t, s)).collect();
                     let (col_archive, col_path) = match &game_col {
@@ -343,7 +380,15 @@ pub fn build(g: &G3Ctx, spec: &Spec) -> Result<(Report, Vec<(String, String, Vec
                     };
                     let summary: Vec<String> = meshes.iter().map(|(_, t, s)| format!("{} {}", g3_write::SHAPE_MATERIALS[*s as usize], t.len())).collect();
                     // In the game's own file when it has one (its head and strings), else our plain form.
-                    let x = g3_write::xnv_of(&meshes, Some(&g.root))?;
+                    let mut x = g3_write::xnv_of(&meshes, Some(&g.root))?;
+                    if let Some(gx) = &game_x {
+                        x.shapes = gx.shapes.clone();
+                        // The entities also keep each part's box from the game's file.
+                        for (i, ((_, ours), (_, game))) in x.streams.iter().zip(&gx.streams).enumerate() {
+                            let grows = (0..3).any(|k| ours.0[k] < game.0[k] - 50.0 || ours.1[k] > game.1[k] + 50.0);
+                            if grows && game.0[0] <= game.1[0] { r.warnings.push(format!("collision: part {i} reaches more than 50 cm past the box the world's entities keep for it")); }
+                        }
+                    }
                     let bytes = match &game_col { Some(k) => g3_write::xnvmsh_in(&g.read(k)?, &x)?, None => g3_write::xnvmsh_write(&x) };
                     files.push((col_archive, col_path, bytes));
                     r.collision = Some(format!("{} triangles from {from}: {}", cp.len() / 3, summary.join(", ")));
@@ -450,6 +495,46 @@ mod tests {
             let lm = crate::lightmap::parse(&f.2).unwrap();
             assert_eq!(lm.elements.len(), lm.count, "{}", f.1);
         }
+    }
+
+    /// The world's entities name each part of a collision by its index in the file, with their own surface
+    /// (`eCCollisionShape`: file, resource index, material). A building whose collision comes from its own
+    /// triangles keeps the game's parts in the game's order: the mill's are stone, then wood. Its gravel floor has
+    /// no part of its own, so it goes with the first one; nothing is left out.
+    #[test]
+    fn a_replaced_collision_keeps_the_parts_the_world_refers_to() {
+        let Ok(root) = std::env::var("G3_GAME") else { return };
+        let g = G3Ctx::open_original(Path::new(&root)).unwrap();
+        let key = "_compiledmesh/g3_objects_myrtana_buildings_01/g3_myrtana_house_mill_water_01.xcmsh";
+        let (r, files) = build(&g, &spec_of(&g, key, &std::env::temp_dir().join("g3ie_test_mill_col"), "model")).unwrap();
+        let col = files.iter().find(|f| f.1.to_lowercase().ends_with("_col.xnvmsh")).expect("collision");
+        let x = crate::g3_res::parse_xnvmsh(&col.2).unwrap();
+        let gx = crate::g3_res::parse_xnvmsh(&g.read("_compiledphysic/g3_myrtana_house_mill_water_01_col.xnvmsh").unwrap()).unwrap();
+        assert_eq!(x.streams.len(), gx.streams.len(), "{:?}", r.collision);
+        assert_eq!(x.shapes, gx.shapes, "{:?}", r.collision);
+        let tris = crate::g3_res::xnvmsh_triangles(&col.2).unwrap().len();
+        // The cooking drops the model's few degenerate triangles.
+        assert!(tris <= r.triangles && tris * 1000 >= r.triangles * 999, "{tris} of {}: {:?}", r.triangles, r.collision);
+        assert!(r.warnings.iter().any(|w| w.contains("debris")), "{:?}", r.warnings);
+    }
+
+    /// A landscape cell's parts are its mesh's elements: one painted with a material of its own still writes the
+    /// game's eight parts, the new material's triangles in the part of its surface (grass: clay).
+    #[test]
+    fn a_cell_with_a_new_material_keeps_its_parts() {
+        let Ok(root) = std::env::var("G3_GAME") else { return };
+        let g = G3Ctx::open_original(Path::new(&root)).unwrap();
+        let key = "_compiledmesh/g3_myrtana_landscape_01/lod/g3_myrtana_landscape_cell_244.xcmsh";
+        let mut spec = spec_of(&g, key, &std::env::temp_dir().join("g3ie_test_cell_new"), "auto");
+        let i = spec.materials.iter().position(|m| m.name == "G3_Nature_Ground_Grass_01_A").unwrap();
+        spec.materials[i].name = "My_Meadow_Grass".into();
+        let (r, files) = build(&g, &spec).unwrap();
+        let col = files.iter().find(|f| f.1.to_lowercase().ends_with("cell_244.xnvmsh")).unwrap();
+        let x = crate::g3_res::parse_xnvmsh(&col.2).unwrap();
+        let gx = crate::g3_res::parse_xnvmsh(&g.read(&key.replace(".xcmsh", ".xnvmsh")).unwrap()).unwrap();
+        assert_eq!(x.streams.len(), gx.streams.len(), "{:?}", r.collision);
+        assert_eq!(x.shapes, gx.shapes);
+        assert_eq!(crate::g3_res::xnvmsh_triangles(&col.2).unwrap().len(), 14226, "{:?} {:?}", r.collision, r.warnings);
     }
 }
 
