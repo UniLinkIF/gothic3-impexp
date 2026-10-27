@@ -191,6 +191,17 @@ pub fn uninstall(game: &Path, name: &str) -> Result<()> {
     rebuild(game, &mut reg)
 }
 
+/// Hand an export's files over: `install` into the game as mod `arg`, a `package` folder `arg` with INSTALL.bat, or one
+/// mod file `arg` (`.g3mod`, for a mod launcher). `title` names the package or the mod, `author` signs a mod file.
+pub fn deliver(game: &Path, mode: &str, arg: &str, title: &str, author: &str, files: &[(String, String, Vec<u8>)]) -> Result<serde_json::Value> {
+    Ok(match mode {
+        "install" => serde_json::json!({ "volumes": install(game, arg, files)? }),
+        "package" => { package(Path::new(arg), title, files)?; serde_json::json!({ "package": arg }) }
+        "mod" => { crate::modfile::write(Path::new(arg), title, author, files)?; serde_json::json!({ "mod": arg }) }
+        m => bail!("mode {m}: install, package or mod"),
+    })
+}
+
 /// Installed mods with their files.
 pub fn installed(game: &Path) -> Result<Vec<(String, Vec<String>)>> {
     Ok(load(game)?.mods.iter().map(|m| (m.clone(), mod_files(game, m).into_iter().map(|(a, rel, _)| format!("{a}/{rel}")).collect())).collect())

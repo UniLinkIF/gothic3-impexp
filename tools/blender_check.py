@@ -101,6 +101,18 @@ try:
     files = sorted(os.listdir(pkg))
     check({"INSTALL.bat", "ROLLBACK.bat", "_compiledPhysic.vol", "_compiledPhysic.empty"} <= set(files), f"package: {files}")
 
+    # 4b. The same as one mod file (the default): a ZIP with mod.json and the files under their archives.
+    import zipfile
+    r = bpy.ops.gothic3.export_mesh(name="G3_Armor_Helm_Myrtana_01", mode="mod", folder=OUT, title="Helm (test)")
+    mf = os.path.join(OUT, "Helm (test).g3mod")
+    ok = r == {"FINISHED"} and os.path.isfile(mf)
+    if ok:
+        with zipfile.ZipFile(mf) as z:
+            m = json.loads(z.read("mod.json"))
+            names = z.namelist()
+        ok = m["game"] == "gothic3" and any(n.startswith("files/_compiledPhysic/") for n in names) and all(f"files/{f}" in names for f in m["files"])
+    check(ok, f"mod file: {mf if os.path.isfile(mf) else 'missing'}")
+
     # 5. A model whose collision PhysX keeps as an open mesh (mass -1): its _COL imports now.
     clear()
     bpy.ops.gothic3.import_mesh(name="G3_Myrtana_Faring_Castle_Wall_Stairs_01")

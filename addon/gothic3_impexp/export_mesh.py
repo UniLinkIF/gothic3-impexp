@@ -183,12 +183,9 @@ class G3_OT_export_mesh(bpy.types.Operator):
     bl_description = "Виділені об'єкти → модель Gothic 3: замінити наявну (та сама назва) або додати нову; встановити в гру або зібрати пакет мода"
 
     name: StringProperty(name="Назва моделі", description="Назва .xcmsh у грі. Наявна назва — заміна (напр. G3_Object_Barrel_02), нова — додати", options={"SKIP_SAVE"})
-    mode: EnumProperty(name="Куди", items=(
-        ("install", "Встановити в гру", "Одразу в гру (том-латка поверх архівів); моди додаються один до одного, прибрати — панель Gothic 3"),
-        ("package", "Пакет мода", "Папка з томами, INSTALL.bat і ROLLBACK.bat, щоб поділитися"),
-    ), default="install")
-    folder: StringProperty(name="Папка пакета", subtype="DIR_PATH", description="Куди скласти пакет (типово — папка модів з налаштувань)")
-    title: StringProperty(name="Назва мода", description="Підпис у INSTALL.bat і README", options={"SKIP_SAVE"})
+    mode: EnumProperty(name="Куди", items=core.MODES, default="mod")
+    folder: StringProperty(name="Тека", subtype="DIR_PATH", description="Куди покласти файл мода чи пакет (типово: файл — у теку Mods гри, пакет — у теку модів з налаштувань)")
+    title: StringProperty(name="Назва мода", description="Як мод зветься в лаунчері чи INSTALL.bat (типово — назва моделі)", options={"SKIP_SAVE"})
     scale: FloatProperty(name="Масштаб", description="Як при імпорті: 0.01 = метри Blender", default=0.01, min=1e-6)
     collision: EnumProperty(name="Колізія", items=(
         ("auto", "Так", "З об'єктів *_COL (опукла *_CV — з об'єктів *_CV або з самої моделі); без них — з самої моделі, якщо вона нова або це рельєф (його колізія = його трикутники); інакше колізія гри лишається"),
@@ -210,7 +207,7 @@ class G3_OT_export_mesh(bpy.types.Operator):
         col = self.layout.column()
         col.prop(self, "name")
         col.prop(self, "mode", expand=True)
-        if self.mode == "package":
+        if self.mode != "install":
             col.prop(self, "folder")
             col.prop(self, "title")
         col.prop(self, "scale")
@@ -270,11 +267,7 @@ class G3_OT_export_mesh(bpy.types.Operator):
                 doc["collision"] = c
             with open(spec, "w", encoding="utf-8") as f:
                 json.dump(doc, f)
-            if self.mode == "package":
-                folder = core.package_dir(self.folder, self.name)
-                out = core.run("export", core.game_dir(), spec, "package", folder, self.title or self.name)
-            else:
-                out = core.run("export", core.game_dir(), spec, "install", self.name)
+            out, where = core.deliver("export", spec, self.mode, self.name, self.title, self.folder)
         except core.CoreError as e:
             self.report({"ERROR"}, str(e))
             return {"CANCELLED"}
@@ -284,7 +277,6 @@ class G3_OT_export_mesh(bpy.types.Operator):
         for w in r["warnings"]:
             self.report({"WARNING"}, w)
         what = "замінено" if r["replaced"] else "додано"
-        where = folder if self.mode == "package" else "гру"
         if self.mode == "install":
             from . import ui
             ui.refresh()

@@ -39,12 +39,9 @@ class G3_OT_export_motion(bpy.types.Operator):
     category: EnumProperty(name="Категорія", items=catalog.enum_items(catalog.CLIP_CATEGORIES))
     clip: StringProperty(name="Анімація гри", description="Яку анімацію замінити (або взяти за зразок для нової)", search=_search_clip, options={"SKIP_SAVE"})
     as_name: StringProperty(name="Нова назва", description="Порожньо — замінити анімацію гри; назва — нова анімація поруч (напр. Wolf_Stand_None_Fist_P0_Move_Run_N_Fwd_00_%_00_P0_401)", options={"SKIP_SAVE"})
-    mode: EnumProperty(name="Куди", items=(
-        ("install", "Встановити в гру", "Одразу в гру (том-латка); прибрати — панель Gothic 3"),
-        ("package", "Пакет мода", "Папка з томом, INSTALL.bat і ROLLBACK.bat"),
-    ), default="install")
-    folder: StringProperty(name="Папка пакета", subtype="DIR_PATH")
-    title: StringProperty(name="Назва мода", options={"SKIP_SAVE"})
+    mode: EnumProperty(name="Куди", items=core.MODES, default="mod")
+    folder: StringProperty(name="Тека", subtype="DIR_PATH", description="Куди покласти файл мода чи пакет (типово: файл — у теку Mods гри)")
+    title: StringProperty(name="Назва мода", description="Типово — назва анімації", options={"SKIP_SAVE"})
 
     @classmethod
     def poll(cls, context):
@@ -62,7 +59,7 @@ class G3_OT_export_motion(bpy.types.Operator):
         col.prop(self, "clip")
         col.prop(self, "as_name")
         col.prop(self, "mode", expand=True)
-        if self.mode == "package":
+        if self.mode != "install":
             col.prop(self, "folder")
             col.prop(self, "title")
 
@@ -94,11 +91,8 @@ class G3_OT_export_motion(bpy.types.Operator):
             json.dump({"clip": self.clip, "glb": glb, "as_name": self.as_name or None, "effects": effects.as_times(context.scene, action)}, f)
         target = self.as_name or self.clip
         try:
-            if self.mode == "package":
-                folder = core.package_dir(self.folder, target)
-                out = core.run("export-motion", core.game_dir(), spec, "package", folder, self.title or target)
-            else:
-                out = core.run("export-motion", core.game_dir(), spec, "install", target)
+            out, where = core.deliver("export-motion", spec, self.mode, target, self.title, self.folder)
+            if self.mode == "install":
                 from . import ui
                 ui.refresh()
         except core.CoreError as e:
@@ -108,7 +102,7 @@ class G3_OT_export_motion(bpy.types.Operator):
             shutil.rmtree(tmp, ignore_errors=True)
         r = out["report"]
         what = f"нова, за зразком {r['template']}" if r["new"] else "замінено"
-        self.report({"INFO"}, f"{r['clip']} ({what}): {r['bones']} кісток, {r['keys']} ключів, {r['effects']} ефектів, {r['duration']:.2f} с — {action.name}")
+        self.report({"INFO"}, f"{r['clip']} ({what}): {r['bones']} кісток, {r['keys']} ключів, {r['effects']} ефектів, {r['duration']:.2f} с — {action.name} → {where}")
         return {"FINISHED"}
 
 

@@ -488,15 +488,11 @@ pub fn build(g: &G3Ctx, spec: &Spec) -> Result<(Report, Vec<(String, String, Vec
     Ok((r, files))
 }
 
-pub fn run(g: &G3Ctx, game: &Path, spec_path: &str, mode: &str, arg: &str, title: &str) -> Result<serde_json::Value> {
+pub fn run(g: &G3Ctx, game: &Path, spec_path: &str, mode: &str, arg: &str, title: &str, author: &str) -> Result<serde_json::Value> {
     let spec: Spec = serde_json::from_str(&std::fs::read_to_string(spec_path)?).context("export spec")?;
     let (report, files) = build(g, &spec)?;
-    let mut out = serde_json::json!({ "report": report });
-    match mode {
-        "install" => { out["volumes"] = serde_json::json!(crate::mods::install(game, arg, &files)?); }
-        "package" => { crate::mods::package(Path::new(arg), title, &files)?; out["package"] = serde_json::json!(arg); }
-        m => bail!("mode {m}: install or package"),
-    }
+    let mut out = crate::mods::deliver(game, mode, arg, title, author, &files)?;
+    out["report"] = serde_json::to_value(report)?;
     Ok(out)
 }
 

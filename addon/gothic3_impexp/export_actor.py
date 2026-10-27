@@ -120,12 +120,9 @@ class G3_OT_export_actor(bpy.types.Operator):
     bl_description = "Виділені меші на скелеті Gothic 3 → актор гри (нова броня, тіло, голова); скелет і решта — з базового актора"
 
     name: StringProperty(name="Назва актора", description="Назва базового актора — заміна (напр. G3_Hero_Body_Player); нова назва — новий актор поруч", options={"SKIP_SAVE"})
-    mode: EnumProperty(name="Куди", items=(
-        ("install", "Встановити в гру", "Одразу в гру (том-латка); прибрати — панель Gothic 3"),
-        ("package", "Пакет мода", "Папка з томами, INSTALL.bat і ROLLBACK.bat"),
-    ), default="install")
-    folder: StringProperty(name="Папка пакета", subtype="DIR_PATH")
-    title: StringProperty(name="Назва мода", options={"SKIP_SAVE"})
+    mode: EnumProperty(name="Куди", items=core.MODES, default="mod")
+    folder: StringProperty(name="Тека", subtype="DIR_PATH", description="Куди покласти файл мода чи пакет (типово: файл — у теку Mods гри)")
+    title: StringProperty(name="Назва мода", description="Типово — назва актора", options={"SKIP_SAVE"})
     scale: FloatProperty(name="Масштаб", default=0.01, min=1e-6)
 
     @classmethod
@@ -142,7 +139,7 @@ class G3_OT_export_actor(bpy.types.Operator):
         col = self.layout.column()
         col.prop(self, "name")
         col.prop(self, "mode", expand=True)
-        if self.mode == "package":
+        if self.mode != "install":
             col.prop(self, "folder")
             col.prop(self, "title")
 
@@ -172,11 +169,8 @@ class G3_OT_export_actor(bpy.types.Operator):
             spec = os.path.join(tmp, "spec.json")
             with open(spec, "w", encoding="utf-8") as f:
                 json.dump({"base": bases.pop(), "name": self.name, "geometry": geo, "vertices": len(pos), "corners": len(cv), "bones": bones, "materials": materials}, f)
-            if self.mode == "package":
-                folder = core.package_dir(self.folder, self.name)
-                out = core.run("export-actor", core.game_dir(), spec, "package", folder, self.title or self.name)
-            else:
-                out = core.run("export-actor", core.game_dir(), spec, "install", self.name)
+            out, where = core.deliver("export-actor", spec, self.mode, self.name, self.title, self.folder)
+            if self.mode == "install":
                 from . import ui
                 ui.refresh()
         except core.CoreError as e:
@@ -186,7 +180,7 @@ class G3_OT_export_actor(bpy.types.Operator):
             shutil.rmtree(tmp, ignore_errors=True)
         r = out["report"]
         what = "замінено" if r["replaced"] else "новий"
-        self.report({"INFO"}, f"{r['actor']} ({what}): {r['vertices']} вершин, {r['triangles']} трикутників; {'; '.join(r['notes'])}")
+        self.report({"INFO"}, f"{r['actor']} ({what}): {r['vertices']} вершин, {r['triangles']} трикутників; {'; '.join(r['notes'])} → {where}")
         return {"FINISHED"}
 
 

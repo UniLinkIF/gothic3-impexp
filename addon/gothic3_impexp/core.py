@@ -62,3 +62,30 @@ def package_dir(folder, name):
     if folder:
         return bpy.path.abspath(folder)
     return os.path.join(bpy.path.abspath(prefs().mods_dir) if prefs().mods_dir else os.path.join(cache_dir(), "mods"), name)
+
+
+# Where an export goes. A mod file is the way to share: a mod launcher puts it into the game and takes it out again.
+MODES = (
+    ("mod", "Файл мода (.g3mod)", "Один файл у теку Mods гри (або вказану): лаунчер модів підключає й прибирає його; ним зручно ділитися"),
+    ("install", "Встановити в гру", "Одразу в гру (том-латка поверх архівів); прибрати — панель Gothic 3"),
+    ("package", "Пакет з INSTALL.bat", "Тека з томами, INSTALL.bat і ROLLBACK.bat — для гравців без лаунчера"),
+)
+
+
+def mod_file_name(name):
+    """`name` as a file name Windows allows, with the mod file's extension."""
+    clean = "".join("_" if c in '<>:"/\\|?*' or ord(c) < 32 else c for c in name.strip()).strip(". ")
+    return (clean or "mod") + ".g3mod"
+
+
+def deliver(command, spec, mode, name, title, folder):
+    """Run the core's export `command` with the chosen delivery: (its output, where it went)."""
+    if mode == "package":
+        where = package_dir(folder, name)
+        return run(command, game_dir(), spec, "package", where, title or name), where
+    if mode == "mod":
+        import bpy
+        base = bpy.path.abspath(folder) if folder else os.path.join(game_dir(), "Mods")
+        where = os.path.join(base, mod_file_name(title or name))
+        return run(command, game_dir(), spec, "mod", where, title or name, prefs().author), where
+    return run(command, game_dir(), spec, "install", name), "гру"

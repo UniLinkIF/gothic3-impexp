@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.7 — 2026-10-27
+- Export to **one mod file** (`.g3mod`, the default): a ZIP with `mod.json` and the files under their archives, put into
+  the game's `Mods` folder for a mod launcher to put in and take out. The author signing it is set in the preferences.
+
 ## 0.9.6 — 2026-10-27
 - Collision is found where the game keeps it for about a thousand more models: `_compiledPhysic/<name>.xnvmsh`,
   without `_COL`. Open meshes (PhysX mass −1) and older plain files read; every collision file a model uses (4161) reads.

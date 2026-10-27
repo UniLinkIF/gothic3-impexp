@@ -30,6 +30,10 @@ class G3ImpExpPreferences(bpy.types.AddonPreferences):
         description="Куди «Пакет мода» кладе томи з INSTALL.bat / ROLLBACK.bat",
         subtype="DIR_PATH",
     )
+    author: StringProperty(
+        name="Автор модів",
+        description="Підпис у файлах модів (.g3mod), які видно в лаунчері",
+    )
 
     def draw(self, context):
         col = self.layout.column()
@@ -40,6 +44,7 @@ class G3ImpExpPreferences(bpy.types.AddonPreferences):
         col.prop(self, "core_exe")
         col.prop(self, "cache_dir")
         col.prop(self, "mods_dir")
+        col.prop(self, "author")
 
 
 def prefs(context=None):

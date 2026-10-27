@@ -12,12 +12,14 @@
 //!                                                           put on a body by bone name; skeleton = no textures)
 //! gothic3-core clips <game> <actor> [words] [limit]         clips that fit the actor
 //! gothic3-core export <game> <spec.json> install <mod> | package <folder> <title>
-//!                                                           a model from Blender into the game or a mod package
+//!                                                           | mod <file.g3mod> <name> [author]
+//!                                                           a model from Blender into the game, a mod package or a mod file
 //! gothic3-core export-motion <game> <spec.json> install <mod> | package <folder> <title>
+//!                                                           | mod <file.g3mod> <name> [author]
 //!                                                           the animation of a glb on a game clip (replacing it or as a
-//!                                                           new clip), with its frame effects| package <folder> <title>
-//!                                                           a game clip replaced by the animation in the glb
+//!                                                           new clip), with its frame effects
 //! gothic3-core export-actor <game> <spec.json> install <mod> | package <folder> <title>
+//!                                                           | mod <file.g3mod> <name> [author]
 //!                                                           a skinned mesh on a game actor's skeleton
 //! gothic3-core installed <game>                             mods installed from Blender
 //! gothic3-core uninstall <game> <mod>                       remove one
@@ -31,6 +33,7 @@ mod g3_actor;
 mod g3_motion;
 mod g3_res;
 mod g3_write;
+mod modfile;
 mod mods;
 mod motion_write;
 mod nxs;
@@ -147,30 +150,22 @@ fn run(args: &[String]) -> Result<serde_json::Value> {
         }
         (Some("export"), Some(game)) => {
             let g = g3::G3Ctx::open_original(Path::new(game))?;
-            export::run(&g, Path::new(game), a(3).context("spec.json")?, a(4).unwrap_or("install"), a(5).context("mod name or package folder")?, a(6).unwrap_or(""))?
+            export::run(&g, Path::new(game), a(3).context("spec.json")?, a(4).unwrap_or("install"), a(5).context("mod name, package folder or mod file")?, a(6).unwrap_or(""), a(7).unwrap_or(""))?
         }
         (Some("export-motion"), Some(game)) => {
             let g = open(game)?;
             let spec: motion_write::MotionSpec = serde_json::from_str(&std::fs::read_to_string(a(3).context("spec.json")?)?).context("motion spec")?;
             let (report, file) = motion_write::build(&g, &spec)?;
-            let mut out = serde_json::json!({ "report": report });
-            match a(4).unwrap_or("install") {
-                "install" => { out["volumes"] = serde_json::json!(mods::install(Path::new(game), a(5).context("mod name")?, &[file])?); }
-                "package" => { mods::package(Path::new(a(5).context("package folder")?), a(6).unwrap_or(""), &[file])?; }
-                m => bail!("mode {m}: install or package"),
-            }
+            let mut out = mods::deliver(Path::new(game), a(4).unwrap_or("install"), a(5).context("mod name, package folder or mod file")?, a(6).unwrap_or(""), a(7).unwrap_or(""), &[file])?;
+            out["report"] = serde_json::to_value(report)?;
             out
         }
         (Some("export-actor"), Some(game)) => {
             let g = open(game)?;
             let spec: xact_write::ActorSpec = serde_json::from_str(&std::fs::read_to_string(a(3).context("spec.json")?)?).context("actor spec")?;
             let (report, files) = xact_write::build(&g, &spec)?;
-            let mut out = serde_json::json!({ "report": report });
-            match a(4).unwrap_or("install") {
-                "install" => { out["volumes"] = serde_json::json!(mods::install(Path::new(game), a(5).context("mod name")?, &files)?); }
-                "package" => { mods::package(Path::new(a(5).context("package folder")?), a(6).unwrap_or(""), &files)?; }
-                m => bail!("mode {m}: install or package"),
-            }
+            let mut out = mods::deliver(Path::new(game), a(4).unwrap_or("install"), a(5).context("mod name, package folder or mod file")?, a(6).unwrap_or(""), a(7).unwrap_or(""), &files)?;
+            out["report"] = serde_json::to_value(report)?;
             out
         }
         (Some("installed"), Some(game)) => serde_json::to_value(mods::installed(Path::new(game))?)?,

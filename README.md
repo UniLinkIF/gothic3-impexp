@@ -20,7 +20,7 @@ Import and export **Gothic 3** (Piranha Bytes, 2006, Genome engine) models, char
 | Gothic 3 Animations | `.xmot` | animations onto the selected Gothic 3 skeleton: one clip or a whole category — idle, movement, attacks, defence, dialogue and gestures, sitting and lying, interaction, death |
 | Gothic 3 Collision | `.xnvmsh` | only the collision, as a wireframe mesh; one `G3_Shape_<surface>` material per surface (stone, wood, earth…), and an item's convex body. A landscape cell's collision is its own triangles |
 
-**File → Export** (install into the game, or build a mod package with `INSTALL.bat` / `ROLLBACK.bat`):
+**File → Export** — three ways out: **a mod file** `.g3mod` (the default; one file in the game's `Mods` folder that a mod launcher puts in and takes out, and the easy way to share), install straight into the game, or a package with `INSTALL.bat` / `ROLLBACK.bat`:
 
 | Entry | Writes |
 |---|---|
@@ -41,7 +41,7 @@ pose.
 ## Install
 
 1. Blender 5.1 or newer.
-2. *Edit → Preferences → Get Extensions → ⌄ → Install from Disk…* → `gothic3_impexp-0.9.6.zip`.
+2. *Edit → Preferences → Get Extensions → ⌄ → Install from Disk…* → `gothic3_impexp-0.9.7.zip`.
 3. In the add-on's preferences check **Gothic 3 game folder** (the one with `Gothic3.exe`; the Steam default is
    filled in).
 
