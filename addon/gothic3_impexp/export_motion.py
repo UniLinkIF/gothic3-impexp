@@ -9,6 +9,7 @@ Frame effects (footsteps, sounds) go in from the action's own list when it has o
 
 import json
 import os
+import shutil
 import tempfile
 
 import bpy
@@ -16,7 +17,6 @@ from bpy.props import EnumProperty, StringProperty
 
 from . import catalog, core, effects
 from .import_actor import actor_clips
-from .prefs import prefs
 
 
 def _search_clip(self, context, edit_text):
@@ -37,14 +37,14 @@ class G3_OT_export_motion(bpy.types.Operator):
     bl_description = "Активна дія скелета Gothic 3 замінює анімацію гри (за замовчуванням ту, з якої вона прийшла)"
 
     category: EnumProperty(name="Категорія", items=catalog.enum_items(catalog.CLIP_CATEGORIES))
-    clip: StringProperty(name="Анімація гри", description="Яку анімацію замінити (або взяти за зразок для нової)", search=_search_clip)
-    as_name: StringProperty(name="Нова назва", description="Порожньо — замінити анімацію гри; назва — нова анімація поруч (напр. Wolf_Stand_None_Fist_P0_Move_Run_N_Fwd_00_%_00_P0_401)")
+    clip: StringProperty(name="Анімація гри", description="Яку анімацію замінити (або взяти за зразок для нової)", search=_search_clip, options={"SKIP_SAVE"})
+    as_name: StringProperty(name="Нова назва", description="Порожньо — замінити анімацію гри; назва — нова анімація поруч (напр. Wolf_Stand_None_Fist_P0_Move_Run_N_Fwd_00_%_00_P0_401)", options={"SKIP_SAVE"})
     mode: EnumProperty(name="Куди", items=(
         ("install", "Встановити в гру", "Одразу в гру (том-латка); прибрати — панель Gothic 3"),
         ("package", "Пакет мода", "Папка з томом, INSTALL.bat і ROLLBACK.bat"),
     ), default="install")
     folder: StringProperty(name="Папка пакета", subtype="DIR_PATH")
-    title: StringProperty(name="Назва мода")
+    title: StringProperty(name="Назва мода", options={"SKIP_SAVE"})
 
     @classmethod
     def poll(cls, context):
@@ -95,7 +95,7 @@ class G3_OT_export_motion(bpy.types.Operator):
         target = self.as_name or self.clip
         try:
             if self.mode == "package":
-                folder = bpy.path.abspath(self.folder) if self.folder else os.path.join(prefs().mods_dir or tmp, target)
+                folder = core.package_dir(self.folder, target)
                 out = core.run("export-motion", core.game_dir(), spec, "package", folder, self.title or target)
             else:
                 out = core.run("export-motion", core.game_dir(), spec, "install", target)
@@ -104,6 +104,8 @@ class G3_OT_export_motion(bpy.types.Operator):
         except core.CoreError as e:
             self.report({"ERROR"}, str(e))
             return {"CANCELLED"}
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
         r = out["report"]
         what = f"нова, за зразком {r['template']}" if r["new"] else "замінено"
         self.report({"INFO"}, f"{r['clip']} ({what}): {r['bones']} кісток, {r['keys']} ключів, {r['effects']} ефектів, {r['duration']:.2f} с — {action.name}")

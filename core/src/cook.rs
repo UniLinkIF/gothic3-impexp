@@ -309,6 +309,7 @@ mod tests {
                 for (a, b) in ours.edge_flags.iter().zip(&m.edge_flags) { *hist.entry((*b, *a)).or_insert(0usize) += 1; }
             }
         }
+        assert_eq!(bad, 0, "streams our reader cannot read");
         eprintln!("{n} streams ({bad} unread): same vertices and box {same}, same tree {same_tree}, same mass {same_mass}, edge flags {:.2}%", edge_ok as f64 * 100.0 / edge_tot.max(1) as f64);
         let mut h: Vec<_> = hist.into_iter().collect(); h.sort_by(|a, b| b.1.cmp(&a.1)); eprintln!("EDGES (game, ours): {:?}", &h[..h.len().min(12)]);
         assert!(n > 50);

@@ -4,7 +4,8 @@ collision.
 gothic3-core writes the mesh as OBJ + MTL + PNG into the cache (game axes mirrored in Z, centimetres; positions
 welded, every corner keeping its own uv and normal) and Blender's own OBJ importer brings it in. The collision
 (`<name>_COL.xnvmsh`, or `<name>.xnvmsh` beside a landscape cell), when the game has one, comes along as a wireframe
-child named `<name>_COL`, one material per surface (`G3_Shape_<surface>`).
+child named `<name>_COL`, one material per surface (`G3_Shape_<surface>`); an item's convex body (`<name>_CV.xnvmsh`,
+what it has when it lies, falls and rolls) as `<name>_CV`.
 """
 
 import os
@@ -28,17 +29,22 @@ def _import_obj(path, scale):
     return [o for o in bpy.data.objects if o not in before]
 
 
-def import_collision(name, scale, parent=None):
-    path = os.path.join(core.cache_dir(), "meshes", f"{name}_COL.obj")
+def import_collision(name, scale, parent=None, convex=False):
+    """The game's collision of model `name` as a wireframe child `<name>_COL` (or its convex body `<name>_CV`).
+    Returns (object, core report); (None, None) when the game has none; a core error otherwise."""
+    end = "_CV" if convex else "_COL"
+    path = os.path.join(core.cache_dir(), "meshes", f"{name}{end}.obj")
     try:
-        out = core.run("collision", core.game_dir(), name, path)
-    except core.CoreError:
-        return None, None
+        out = core.run("collision", core.game_dir(), name, path, *(["convex"] if convex else []))
+    except core.CoreError as e:
+        if "Gothic 3 has no" in str(e):
+            return None, None
+        raise
     obs = _import_obj(path, scale)
     if not obs:
         return None, None
     col = obs[0]
-    col.name = f"{name}_COL"
+    col.name = f"{name}{end}"
     materials.setup_shape_materials(col)
     col.display_type = "WIRE"
     col.hide_render = True
@@ -56,7 +62,7 @@ class G3_OT_import_mesh(bpy.types.Operator):
 
     category: EnumProperty(name="Категорія", items=catalog.enum_items(catalog.MESH_CATEGORIES))
     name: StringProperty(name="Модель", description="Назва .xcmsh у грі, напр. G3_Object_Barrel_02", search=_search)
-    with_collision: BoolProperty(name="Разом з колізією", description="Колізія як каркасний об'єкт <назва>_COL, якщо в гри вона є", default=True)
+    with_collision: BoolProperty(name="Разом з колізією", description="Колізія як каркасний об'єкт <назва>_COL (і опукла <назва>_CV у предметів), якщо в гри вона є", default=True)
     scale: FloatProperty(name="Масштаб", description="Gothic 3 рахує в сантиметрах; 0.01 = метри Blender", default=0.01, min=1e-6)
 
     def invoke(self, context, event):
@@ -80,8 +86,15 @@ class G3_OT_import_mesh(bpy.types.Operator):
         materials.apply_to_objects(obs, out["materials"], os.path.dirname(out["obj"]))
         note = ""
         if self.with_collision and obs:
-            col, c = import_collision(name, self.scale, obs[0])
-            note = f"; колізія {c['triangles']} трикутників" if col else "; колізії в гри немає"
+            try:
+                col, c = import_collision(name, self.scale, obs[0])
+                hull, h = import_collision(name, self.scale, obs[0], convex=True)
+            except core.CoreError as e:
+                self.report({"WARNING"}, f"колізію не прочитано: {e}")
+            else:
+                note = f"; колізія {c['triangles']} трикутників" if col else "; колізії-сітки в гри немає"
+                if hull:
+                    note += f", опукла {h['triangles']}"
         for w in out["warnings"]:
             self.report({"WARNING"}, w)
         self.report({"INFO"}, f"{name}: {out['vertices']} вершин, {out['triangles']} трикутників, {len(out['materials'])} матеріалів{note}")
@@ -102,11 +115,21 @@ class G3_OT_import_collision(bpy.types.Operator):
         return context.window_manager.invoke_props_dialog(self, width=440)
 
     def execute(self, context):
-        col, out = import_collision(self.name, self.scale)
-        if col is None:
-            self.report({"ERROR"}, f"{self.name}: у гри немає колізії-сітки для цієї моделі")
+        try:
+            col, out = import_collision(self.name, self.scale)
+            hull, h = import_collision(self.name, self.scale, convex=True)
+        except core.CoreError as e:
+            self.report({"ERROR"}, str(e))
             return {"CANCELLED"}
-        self.report({"INFO"}, f"{self.name}: колізія, {out['triangles']} трикутників")
+        if col is None and hull is None:
+            self.report({"ERROR"}, f"{self.name}: у гри немає колізії для цієї моделі")
+            return {"CANCELLED"}
+        parts = []
+        if col:
+            parts.append(f"{out['triangles']} трикутників")
+        if hull:
+            parts.append(f"опукла {h['triangles']}")
+        self.report({"INFO"}, f"{self.name}: колізія, {', '.join(parts)}")
         return {"FINISHED"}
 
 

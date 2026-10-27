@@ -9,7 +9,10 @@ inverse of the importer's, so triangle order stays as it is (Blender counter-clo
 clockwise, as Gothic 3's own meshes). V is flipped to Direct3D's V down.
 """
 
+import json
 import os
+import re
+import shutil
 import tempfile
 
 import bpy
@@ -17,11 +20,20 @@ import numpy as np
 from bpy.props import EnumProperty, FloatProperty, StringProperty
 
 from . import core
-from .prefs import prefs
 
 SHAPE_MATERIALS = ("none", "wood", "metal", "water", "stone", "earth", "ice", "leather", "clay", "glass", "flesh", "snow", "debris", "foliage", "magic", "grass", "sand")
 # What the surfaces mean in the game (clay is what grass and forest floor use).
 SHAPE_HINTS = {"clay": "трава, лісова підстилка", "debris": "гравій, річкове каміння", "earth": "земля, стежки", "foliage": "солома, листя"}
+
+# A collision object is named after its model with _COL (triangle mesh) or _CV (convex hull) at the end; Blender may
+# add .001 when there are copies.
+_COLLISION = re.compile(r"_(col|cv)(\.\d+)?$", re.IGNORECASE)
+
+
+def collision_kind(name):
+    """'col' for a *_COL object, 'cv' for a *_CV object, else None."""
+    m = _COLLISION.search(name)
+    return m.group(1).lower() if m else None
 
 
 def _linked_image(socket):
@@ -43,9 +55,23 @@ def _image_png(img, tmp):
     path = bpy.path.abspath(img.filepath) if img.filepath else ""
     if path and os.path.isfile(path) and not img.packed_file and not img.is_dirty and path.lower().endswith(".png"):
         return path
-    out = os.path.join(tmp, bpy.path.clean_name(img.name) + ".png")
-    c = img.copy()
+    # Its pixels as Blender holds them (a JPG/TGA on disk, a packed or a painted unsaved image) into a fresh PNG: a
+    # copy of the image would have no pixels of its own to save.
+    w, h = img.size
+    if not w or not h:
+        raise core.CoreError(f"Текстура {img.name}: немає даних зображення (файл не знайдено?)")
+    px = np.empty(w * h * 4, np.float32)
+    img.pixels.foreach_get(px)
+    if img.is_float and img.colorspace_settings.name != "Non-Color":
+        # Float images hold linear values; a PNG wants them encoded (sRGB).
+        rgb = px.reshape(-1, 4)[:, :3]
+        np.clip(rgb, 0.0, 1.0, out=rgb)
+        rgb[:] = np.where(rgb <= 0.0031308, rgb * 12.92, 1.055 * np.power(rgb, 1 / 2.4) - 0.055)
+    out = os.path.join(tmp, f"{len(os.listdir(tmp))}_{bpy.path.clean_name(img.name)}.png")
+    c = bpy.data.images.new("g3_export_png", w, h, alpha=True)
     try:
+        c.colorspace_settings.name = "Non-Color"
+        c.pixels.foreach_set(px)
         c.filepath_raw = out
         c.file_format = "PNG"
         c.save()
@@ -147,7 +173,8 @@ def _default_name(context):
     entry = ob.get("g3_entry")
     if entry:
         return entry.rsplit("/", 1)[-1].split(".", 1)[0]
-    return bpy.path.clean_name(ob.name.split(".")[0])
+    # As it is (the core makes it a file name, Cyrillic transliterated).
+    return ob.name.split(".")[0]
 
 
 class G3_OT_export_mesh(bpy.types.Operator):
@@ -155,16 +182,16 @@ class G3_OT_export_mesh(bpy.types.Operator):
     bl_label = "Gothic 3 Model → Mod (.xcmsh)"
     bl_description = "Виділені об'єкти → модель Gothic 3: замінити наявну (та сама назва) або додати нову; встановити в гру або зібрати пакет мода"
 
-    name: StringProperty(name="Назва моделі", description="Назва .xcmsh у грі. Наявна назва — заміна (напр. G3_Object_Barrel_02), нова — додати")
+    name: StringProperty(name="Назва моделі", description="Назва .xcmsh у грі. Наявна назва — заміна (напр. G3_Object_Barrel_02), нова — додати", options={"SKIP_SAVE"})
     mode: EnumProperty(name="Куди", items=(
         ("install", "Встановити в гру", "Одразу в гру (том-латка поверх архівів); моди додаються один до одного, прибрати — панель Gothic 3"),
         ("package", "Пакет мода", "Папка з томами, INSTALL.bat і ROLLBACK.bat, щоб поділитися"),
     ), default="install")
     folder: StringProperty(name="Папка пакета", subtype="DIR_PATH", description="Куди скласти пакет (типово — папка модів з налаштувань)")
-    title: StringProperty(name="Назва мода", description="Підпис у INSTALL.bat і README")
+    title: StringProperty(name="Назва мода", description="Підпис у INSTALL.bat і README", options={"SKIP_SAVE"})
     scale: FloatProperty(name="Масштаб", description="Як при імпорті: 0.01 = метри Blender", default=0.01, min=1e-6)
     collision: EnumProperty(name="Колізія", items=(
-        ("auto", "Так", "З об'єктів *_COL; без них — з самої моделі, якщо вона нова або це рельєф (його колізія = його трикутники); інакше колізія гри лишається"),
+        ("auto", "Так", "З об'єктів *_COL (опукла *_CV — з об'єктів *_CV або з самої моделі); без них — з самої моделі, якщо вона нова або це рельєф (його колізія = його трикутники); інакше колізія гри лишається"),
         ("model", "З моделі", "Колізія з трикутників самої моделі, навіть якщо є *_COL чи колізія гри"),
         ("none", "Ні", "Лишити колізію гри як є (або без колізії)"),
     ), default="auto")
@@ -193,14 +220,18 @@ class G3_OT_export_mesh(bpy.types.Operator):
 
     def execute(self, context):
         selected = [o for o in context.selected_objects if o.type == "MESH"]
-        # Objects named *_COL are the collision shape, the rest the model.
-        col_objects = [o for o in selected if "_col" in o.name.lower()]
-        objects = [o for o in selected if o not in col_objects]
-        # A model imported with its collision carries it as a *_COL child: it goes along unselected.
+        # Objects named *_COL are the collision shape, *_CV the convex hulls (the bodies of items), the rest the model.
+        col_objects = [o for o in selected if collision_kind(o.name) == "col"]
+        cv_objects = [o for o in selected if collision_kind(o.name) == "cv"]
+        objects = [o for o in selected if collision_kind(o.name) is None]
+        # A model imported with its collision carries it as a *_COL / *_CV child: it goes along unselected.
         for o in objects:
             for c in o.children_recursive:
-                if c.type == "MESH" and "_col" in c.name.lower() and c not in col_objects:
+                kind = collision_kind(c.name) if c.type == "MESH" else None
+                if kind == "col" and c not in col_objects:
                     col_objects.append(c)
+                if kind == "cv" and c not in cv_objects:
+                    cv_objects.append(c)
         if not objects or not self.name:
             self.report({"ERROR"}, "Виділіть меш і вкажіть назву моделі")
             return {"CANCELLED"}
@@ -215,11 +246,10 @@ class G3_OT_export_mesh(bpy.types.Operator):
             with open(geo, "wb") as f:
                 for a in (pos, nrm, uv, mat):
                     f.write(np.ascontiguousarray(a).tobytes())
-            import json
             spec = os.path.join(tmp, "spec.json")
             doc = {"name": self.name, "geometry": geo, "corners": len(pos), "materials": materials}
             if self.collision != "none":
-                c = {"material": self.shape_material, "mode": self.collision}
+                c = {"material": self.shape_material, "mode": self.collision, "convex": []}
                 cg = gather(context, col_objects, self.scale, tmp) if col_objects else None
                 if cg is not None:
                     cgeo = os.path.join(tmp, "collision.bin")
@@ -227,17 +257,29 @@ class G3_OT_export_mesh(bpy.types.Operator):
                         for a in cg[:4]:
                             f.write(np.ascontiguousarray(a).tobytes())
                     c.update(geometry=cgeo, corners=len(cg[0]), materials=cg[4])
+                # One hull per *_CV object, in name order (the game's convex collisions have one part, rarely two).
+                for i, o in enumerate(sorted(cv_objects, key=lambda o: o.name)):
+                    hg = gather(context, [o], self.scale, tmp)
+                    if hg is None:
+                        continue
+                    hgeo = os.path.join(tmp, f"convex{i}.bin")
+                    with open(hgeo, "wb") as f:
+                        for a in hg[:4]:
+                            f.write(np.ascontiguousarray(a).tobytes())
+                    c["convex"].append({"geometry": hgeo, "corners": len(hg[0]), "materials": hg[4]})
                 doc["collision"] = c
             with open(spec, "w", encoding="utf-8") as f:
                 json.dump(doc, f)
             if self.mode == "package":
-                folder = bpy.path.abspath(self.folder) if self.folder else os.path.join(prefs().mods_dir or tmp, self.name)
+                folder = core.package_dir(self.folder, self.name)
                 out = core.run("export", core.game_dir(), spec, "package", folder, self.title or self.name)
             else:
                 out = core.run("export", core.game_dir(), spec, "install", self.name)
         except core.CoreError as e:
             self.report({"ERROR"}, str(e))
             return {"CANCELLED"}
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
         r = out["report"]
         for w in r["warnings"]:
             self.report({"WARNING"}, w)
@@ -248,6 +290,8 @@ class G3_OT_export_mesh(bpy.types.Operator):
             ui.refresh()
         if r.get("collision"):
             self.report({"INFO"}, f"колізія: {r['collision']}")
+        if r.get("convex"):
+            self.report({"INFO"}, f"опукла колізія: {r['convex']}")
         if r.get("lods"):
             self.report({"INFO"}, f"разом з LOD: {', '.join(r['lods'])}")
         if r.get("lightmaps"):

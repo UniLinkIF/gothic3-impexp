@@ -1,11 +1,13 @@
 """Frame effects of a Gothic 3 clip (footsteps, hit sounds, …): kept on the action as the custom property
-`g3_frame_effects`, a dict of Blender frame -> effect name, shown and edited in the Gothic 3 panel. Motion export
-writes them into the clip (the game keeps them per key frame)."""
+`g3_frame_effects`, a dict of Blender frame -> effect names (several on one frame joined by `|`, as a clip often has a
+footstep and a sound together), shown and edited in the Gothic 3 panel. Motion export writes them into the clip (the
+game keeps them per key frame)."""
 
 import bpy
 from bpy.props import StringProperty
 
 PROP = "g3_frame_effects"
+SEP = "|"
 
 
 def _fps(scene):
@@ -15,7 +17,10 @@ def _fps(scene):
 def store(scene, action, effects):
     """`effects` = [(time s, name)] from the core."""
     start = action.frame_range[0]
-    action[PROP] = {str(int(round(start + t * _fps(scene)))): n for t, n in effects}
+    fx = {}
+    for t, n in effects:
+        fx.setdefault(str(int(round(start + t * _fps(scene)))), []).append(n)
+    action[PROP] = {f: SEP.join(ns) for f, ns in fx.items()}
 
 
 def as_times(scene, action):
@@ -23,7 +28,11 @@ def as_times(scene, action):
     if PROP not in action:
         return None
     start = action.frame_range[0]
-    return sorted(((int(f) - start) / _fps(scene), n) for f, n in action[PROP].items())
+    return sorted(((int(f) - start) / _fps(scene), n) for f, ns in action[PROP].items() for n in _names(ns))
+
+
+def _names(value):
+    return [n for n in str(value).split(SEP) if n]
 
 
 def _action(context):
@@ -32,7 +41,7 @@ def _action(context):
 
 
 def _known(self, context, edit_text):
-    names = sorted({n for a in bpy.data.actions if PROP in a for n in a[PROP].values()})
+    names = sorted({n for a in bpy.data.actions if PROP in a for ns in a[PROP].values() for n in _names(ns)})
     return [n for n in names if edit_text.lower() in n.lower()][:200]
 
 
@@ -56,7 +65,8 @@ class G3_OT_effect_add(bpy.types.Operator):
             return {"CANCELLED"}
         a = _action(context)
         fx = dict(a.get(PROP, {}))
-        fx[str(context.scene.frame_current)] = self.name
+        f = str(context.scene.frame_current)
+        fx[f] = SEP.join(_names(fx.get(f, "")) + [self.name])
         a[PROP] = fx
         return {"FINISHED"}
 
@@ -67,12 +77,17 @@ class G3_OT_effect_remove(bpy.types.Operator):
     bl_options = {"REGISTER", "UNDO"}
 
     frame: StringProperty()
+    name: StringProperty()
 
     def execute(self, context):
         a = _action(context)
         if a is not None and PROP in a:
             fx = dict(a[PROP])
-            fx.pop(self.frame, None)
+            rest = [n for n in _names(fx.get(self.frame, "")) if n != self.name]
+            if rest:
+                fx[self.frame] = SEP.join(rest)
+            else:
+                fx.pop(self.frame, None)
             a[PROP] = fx
         return {"FINISHED"}
 
@@ -89,9 +104,11 @@ def draw_panel(layout, context):
     if not fx:
         box.label(text="Немає" if PROP in a else "Як у кліпі гри")
     for f in sorted(fx.keys(), key=int):
-        r = box.row()
-        r.label(text=f"{f}: {fx[f]}")
-        r.operator("gothic3.effect_remove", text="", icon="X").frame = f
+        for n in _names(fx[f]):
+            r = box.row()
+            r.label(text=f"{f}: {n}")
+            op = r.operator("gothic3.effect_remove", text="", icon="X")
+            op.frame, op.name = f, n
 
 
 _classes = (G3_OT_effect_add, G3_OT_effect_remove)

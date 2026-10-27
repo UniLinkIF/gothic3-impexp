@@ -98,10 +98,12 @@ impl G3Ctx {
     /// `root` = the Gothic 3 install folder (the one with `Data\`).
     pub fn open(root: &Path) -> Result<Self> { Self::open_skipping(root, &[]) }
 
-    /// The game as it ships: without the volumes our installed mods live in (a re-export reads the meshes and
-    /// lightmaps it replaces, not its own last version).
+    /// The game as it ships: without the volumes our installed mods live in, nor RisenLab Starter's (a re-export
+    /// reads the meshes and lightmaps it replaces, not its own last version).
     pub fn open_original(root: &Path) -> Result<Self> {
-        let ours: Vec<String> = crate::mods::load(root).volumes.into_values().map(|v| v.to_lowercase()).collect();
+        let mut ours: Vec<String> = crate::mods::load(root)?.volumes.into_values().collect();
+        ours.extend(crate::mods::other_volumes(root));
+        let ours: Vec<String> = ours.iter().map(|v| v.to_lowercase()).collect();
         Self::open_skipping(root, &ours)
     }
 

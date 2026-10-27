@@ -110,9 +110,10 @@ _clip_cache = {}
 
 
 def actor_clips(actor):
-    if actor not in _clip_cache:
-        _clip_cache[actor] = core.run("clips", core.game_dir(), actor, "", "100000")
-    return _clip_cache[actor]
+    key = (core.game_dir(), actor)
+    if key not in _clip_cache:
+        _clip_cache[key] = core.run("clips", key[0], actor, "", "100000")
+    return _clip_cache[key]
 
 
 def _search_clip(self, context, edit_text):

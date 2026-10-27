@@ -299,6 +299,7 @@ pub fn frame_effects(d: &[u8]) -> Result<Vec<(u16, String)>> {
     if u16::from_le_bytes([d[14], d[15]]) < 5 { return Ok(vec![]); }
     let n = u16::from_le_bytes([d[44], d[45]]) as usize;
     if n == 0 { return Ok(vec![]); }
+    if d.len() < 46 + n * 4 { bail!("{n} frame effects run past the end of the clip"); }
     let table = crate::g3_res::genomfle_strings(d)?;
     (0..n).map(|i| {
         let p = 46 + i * 4;

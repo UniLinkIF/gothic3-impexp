@@ -9,7 +9,8 @@
 //!          · u32 convex parts · u32 flat parts · [u16 convex part[nt]] · [flat part[nt]: u8 if < 256 parts, else u16]
 //!          · u32 model bytes · collision tree (below)
 //!          · f32 geometric epsilon · f32 sphere[4] (centre, radius) · f32 AABB[6] (min, max)
-//!          · f32 mass (volume, density 1) · f32 inertia[9] · f32 centre of mass[3]
+//!          · f32 mass (volume, density 1) · [f32 inertia[9] · f32 centre of mass[3]] (only when mass is not -1: an
+//!            open mesh has no volume, and PhysX writes neither)
 //!          · u32 nt · u8 edge flags[nt]
 //! model    "OPC\x01" u32 0 · u32 code (4 = single leaf, 3 = quantized no-leaf tree)
 //!          · [u32 nodes · nodes × 20 bytes · f32 centre coeff[3] · f32 extents coeff[3]]
@@ -158,8 +159,7 @@ pub fn read_trimesh(r: &mut Reader) -> Result<TriMesh> {
     let sphere = arr(r)?;
     let aabb = arr(r)?;
     let mass = f32r(r)?;
-    let inertia = arr(r)?;
-    let com = arr(r)?;
+    let (inertia, com) = if mass == -1.0 { ([0.0; 9], [0.0; 3]) } else { (arr(r)?, arr(r)?) };
     let ne = r.u32()? as usize;
     let edge_flags = r.bytes(ne)?.to_vec();
     Ok(TriMesh { flags, edge_threshold, verts, tris, materials, remap, convex_parts, flat_parts, convex_part, flat_part, model, geom_epsilon, sphere, aabb, mass, inertia, com, edge_flags })
@@ -191,7 +191,7 @@ pub fn write_trimesh(m: &TriMesh) -> Vec<u8> {
     f(&mut o, m.geom_epsilon);
     for x in m.sphere.iter().chain(&m.aabb) { f(&mut o, *x); }
     f(&mut o, m.mass);
-    for x in m.inertia.iter().chain(&m.com) { f(&mut o, *x); }
+    if m.mass != -1.0 { for x in m.inertia.iter().chain(&m.com) { f(&mut o, *x); } }
     u(&mut o, m.edge_flags.len() as u32);
     o.extend(&m.edge_flags);
     o
@@ -236,4 +236,30 @@ pub fn mass_properties(verts: &[[f32; 3]], tris: &[[u32; 3]]) -> (f64, [f64; 3],
     let iyz = -(intg[8] - mass * cm[1] * cm[2]);
     let ixz = -(intg[9] - mass * cm[2] * cm[0]);
     (mass, cm, [ixx, ixy, ixz, ixy, iyy, iyz, ixz, iyz, izz])
+}
+
+/// The hull of a PhysX cooked convex mesh (`NXS\x01CVXM`, the `*_CV` collisions of items): its vertices (metres) and
+/// triangles, from the `ICE\x01CVHL` chunk.
+///
+/// ```text
+/// "NXS\x01CVXM" u32 version (2) · u32 4 · "ICE\x01CLHL" u32 0 · "ICE\x01CVHL" u32 4
+///   · u32 vertices · u32 triangles · u32 edges · u32 polygons · u32 · u32 · f32 vertex[3·vertices]
+///   · u32 max index · triangle corners[3·triangles] (u8/u16/u32 by max) · … (polygons, the "VALE" valencies, the
+///   OPC tree of the hull, "SUPM" support map, "GAUS" Gauss map, mass)
+/// hull version 2 (an older cooking): no edge … counts after the triangle count, no max index, u16 corners
+/// ```
+pub fn read_convex_hull(d: &[u8]) -> Result<(Vec<[f32; 3]>, Vec<[u32; 3]>)> {
+    ensure!(d.starts_with(b"NXS\x01CVXM"), "no NXS CVXM header");
+    let at = d.windows(8).position(|w| w == b"ICE\x01CVHL").ok_or_else(|| anyhow::anyhow!("convex mesh without a hull (CVHL)"))?;
+    let mut r = Reader { d, at: at + 8 };
+    let version = r.u32()?;
+    ensure!(version == 4 || version == 2, "hull version {version}");
+    let (nv, nt) = (r.u32()? as usize, r.u32()? as usize);
+    // Version 2 (an older cooking, one file in the game): no edge and polygon counts, and u16 corners.
+    if version == 4 { r.bytes(16)?; }
+    let verts = (0..nv).map(|_| arr::<3>(&mut r)).collect::<Result<Vec<_>>>()?;
+    let w = if version == 4 { width_for(r.u32()?) } else { 2 };
+    let tris = (0..nt).map(|_| Ok([read_uint(&mut r, w)?, read_uint(&mut r, w)?, read_uint(&mut r, w)?])).collect::<Result<Vec<_>>>()?;
+    ensure!(tris.iter().flatten().all(|&i| (i as usize) < nv), "hull corner past its {nv} vertices");
+    Ok((verts, tris))
 }

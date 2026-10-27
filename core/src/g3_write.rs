@@ -2,11 +2,12 @@
 //!
 //! Image, as the game's (`GENOMFLE` + `G3IMG`, measured on the install):
 //! ```text
-//! 0   "GENOMFLE" · u16 1 · u32 string-table offset · u32 0x20 · u32 pixel sum · u32 0 · FILETIME · u32 source size
-//!     · u16 1
-//! 40  "G3IMG" · u16 2 · u16 47 · u32 width · u32 height · u64 0 · u32 mip levels · u32 0 · FourCC · u32 1
-//!     · u32 pixel sum (Σ w·h over the levels, halved for DXT1) · u16 0
-//! 87  mip levels, smallest first, full size last (DXT blocks; a level under 4×4 still takes one block)
+//! 0   "GENOMFLE" · u16 1 · u32 string-table offset · u16 0x20 · u32 pixel sum · u32 (varies; 0 here) · FILETIME
+//!     · u32 source size (its TGA: w·h·3 + 44, or w·h·4 + 44 with alpha) · u16 1
+//! 38  "G3IMG" · u16 2 · u16 47 · u32 width · u32 height · u64 (varies; 0 here) · u32 mip levels · u32 0 · FourCC
+//!     · u32 1 · u32 pixel sum (Σ w·h over the levels, halved for DXT1) · u32 0
+//! 87  mip levels, smallest first, full size last (DXT blocks; a level under 4×4 still takes one block), down to
+//!     where the shorter side is 1
 //!     string table: u32 0xDEADBEEF · u8 1 · u32 0 (no strings)
 //! ```
 //! Material: a shipped `GENOMFLE` material is the template; its texture names (`*.tga` in the string table) become
@@ -28,7 +29,9 @@ pub fn ximg(rgba: &[u8], w: u32, h: u32, kind: Dxt, filetime: u64) -> Result<Vec
         let img = image::RgbaImage::from_raw(w, h, rgba.to_vec()).context("rgba")?;
         image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle).into_raw()
     };
-    let levels = crate::dds::build_mip_chain(&base, nw, nh);
+    // The game's chains end where the shorter side reaches 1 (128×256 has 8 levels, down to 1×2).
+    let mut levels = crate::dds::build_mip_chain(&base, nw, nh);
+    levels.truncate(nw.min(nh).trailing_zeros() as usize + 1);
     let fmt = match kind { Dxt::Dxt1 => Format::Bc1, Dxt::Dxt5 => Format::Bc3 };
     let mut data = vec![];
     for (lw, lh, px) in levels.iter().rev() {
@@ -43,11 +46,13 @@ pub fn ximg(rgba: &[u8], w: u32, h: u32, kind: Dxt, filetime: u64) -> Result<Vec
     o.extend(1u16.to_le_bytes());
     let table = 87 + data.len() as u32;
     o.extend(table.to_le_bytes());
-    o.extend(0x20u32.to_le_bytes());
+    o.extend(0x20u16.to_le_bytes());
     o.extend(sum.to_le_bytes());
     o.extend(0u32.to_le_bytes());
     o.extend(filetime.to_le_bytes());
-    o.extend((nw * nh * 4 + 18).to_le_bytes());
+    // The size of the source picture (a TGA: 18 head + pixels + 26 foot), 32-bit when it has an alpha channel.
+    let opaque = base.chunks_exact(4).all(|p| p[3] == 255);
+    o.extend((nw * nh * if opaque { 3 } else { 4 } + 44).to_le_bytes());
     o.extend(1u16.to_le_bytes());
     o.extend(b"G3IMG");
     o.extend(2u16.to_le_bytes());
@@ -60,7 +65,7 @@ pub fn ximg(rgba: &[u8], w: u32, h: u32, kind: Dxt, filetime: u64) -> Result<Vec
     o.extend(match kind { Dxt::Dxt1 => b"DXT1", Dxt::Dxt5 => b"DXT5" });
     o.extend(1u32.to_le_bytes());
     o.extend(sum.to_le_bytes());
-    o.extend(0u16.to_le_bytes());
+    o.extend(0u32.to_le_bytes());
     debug_assert_eq!(o.len(), 87);
     o.extend(data);
     o.extend(0xDEADBEEFu32.to_le_bytes());
@@ -130,6 +135,37 @@ mod tests {
         }
     }
 
+    /// Our image head is laid out as the game's: the same fields at the same offsets, data from 87.
+    #[test]
+    fn written_images_have_the_games_head() {
+        let Ok(root) = std::env::var("G3_GAME") else { return };
+        let g = crate::g3::G3Ctx::open(std::path::Path::new(&root)).unwrap();
+        let u32_ = |d: &[u8], at: usize| u32::from_le_bytes(d[at..at + 4].try_into().unwrap());
+        let (mut seen, mut odd) = (0, vec![]);
+        // Textures of models (the interface's and the far-view pictures have one level and other heads).
+        for k in g.keys().into_iter().filter(|k| k.ends_with(".ximg") && !k.contains("/__gui") && !k.contains("/_special/")).step_by(5) {
+            let d = g.read(&k).unwrap();
+            let four = &d[71..75];
+            if four != b"DXT1" && four != b"DXT5" { continue; }
+            let (w, h) = (u32_(&d, 47), u32_(&d, 51));
+            let kind = if four == b"DXT1" { Dxt::Dxt1 } else { Dxt::Dxt5 };
+            let ours = ximg(&vec![128u8; (w * h * 4) as usize], w, h, kind, 0).unwrap();
+            let same = |a: usize, n: usize| d[a..a + n] == ours[a..a + n];
+            // Magic and version; 0x20 and the pixel sum; 1; "G3IMG", 2 and the size (the u16 between varies: 47, 212); levels;
+            // FourCC, 1, sum, 0; length.
+            let why: Vec<&str> = [("head", same(0, 10)), ("sum", same(14, 6)), ("one", same(36, 2)), ("g3img", same(38, 7) && same(47, 8)), ("levels", same(63, 4)),
+                ("tail", same(71, 16)), ("length", d.len() == ours.len() && u32_(&d, 10) == u32_(&ours, 10))].iter().filter(|x| !x.1).map(|x| x.0).collect();
+            if !why.is_empty() { odd.push(format!("{k} {w}x{h} {why:?}")); }
+            seen += 1;
+        }
+        assert!(seen > 100, "{seen} images");
+        assert!(odd.len() * 100 <= seen * 3, "{} of {seen} differ: {odd:#?}", odd.len());
+        // The source size: its TGA, 24-bit without alpha.
+        assert_eq!(u32_(&ximg(&[9u8; 64 * 32 * 4], 64, 32, Dxt::Dxt5, 0).unwrap(), 32), 64 * 32 * 4 + 44);
+        assert_eq!(u32_(&ximg(&[255u8; 64 * 32 * 4], 64, 32, Dxt::Dxt1, 0).unwrap(), 32), 64 * 32 * 3 + 44);
+    }
+
+
     #[test]
     fn templates_take_our_textures() {
         let Ok(root) = std::env::var("G3_GAME") else { return };
@@ -174,7 +210,7 @@ pub fn xnvmsh(meshes: &[(Vec<[f32; 3]>, Vec<[u32; 3]>, u8)]) -> Result<Vec<u8>> 
 pub fn xnv_of(meshes: &[(Vec<[f32; 3]>, Vec<[u32; 3]>, u8)], game: Option<&std::path::Path>) -> Result<crate::g3_res::Xnv> {
     let mut x = crate::g3_res::Xnv { streams: vec![], all: EMPTY_BOX, convex: 0, shapes: vec![] };
     let streams = match game {
-        Some(g) => game_cook(g, meshes)?,
+        Some(g) => game_cook(g, meshes, false)?,
         None => meshes.iter().map(|(v, t, _)| Ok(crate::nxs::write_trimesh(&crate::cook::cook(&v.iter().map(|p| p.map(|c| c / 100.0)).collect::<Vec<_>>(), t, &[])?))).collect::<Result<_>>()?,
     };
     for ((verts, _, mat), st) in meshes.iter().zip(streams) {
@@ -186,9 +222,15 @@ pub fn xnv_of(meshes: &[(Vec<[f32; 3]>, Vec<[u32; 3]>, u8)], game: Option<&std::
     Ok(x)
 }
 
+/// Convex hulls of point sets (cm), cooked by the game's PhysX as its own `*_CV` bodies are (CVXM streams).
+pub fn convex_streams(game: &std::path::Path, hulls: &[Vec<[f32; 3]>]) -> Result<Vec<Vec<u8>>> {
+    let meshes: Vec<(Vec<[f32; 3]>, Vec<[u32; 3]>, u8)> = hulls.iter().map(|p| (p.clone(), vec![], 0)).collect();
+    game_cook(game, &meshes, true)
+}
+
 /// The meshes (cm) cooked by `g3cook.exe` with the game's `NxCooking.dll`; every triangle gets material 1, as in
-/// the game's own streams.
-fn game_cook(game: &std::path::Path, meshes: &[(Vec<[f32; 3]>, Vec<[u32; 3]>, u8)]) -> Result<Vec<Vec<u8>>> {
+/// the game's own streams. `convex`: the hull of each mesh's vertices instead.
+fn game_cook(game: &std::path::Path, meshes: &[(Vec<[f32; 3]>, Vec<[u32; 3]>, u8)], convex: bool) -> Result<Vec<Vec<u8>>> {
     // Next to gothic3-core.exe in the add-on; in a development checkout, the built helper in cook32/.
     let here = std::env::current_exe()?;
     let exe = [here.with_file_name("g3cook.exe"), std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("cook32").join("g3cook.exe")]
@@ -210,11 +252,14 @@ fn game_cook(game: &std::path::Path, meshes: &[(Vec<[f32; 3]>, Vec<[u32; 3]>, u8
     #[cfg(windows)] use std::os::windows::process::CommandExt;
     let mut cmd = std::process::Command::new(&exe);
     cmd.arg(game).arg(&inp).arg(&out);
+    if convex { cmd.arg("convex"); }
     #[cfg(windows)] cmd.creation_flags(0x0800_0000);
-    let r = cmd.output().context("run g3cook.exe")?;
-    if !r.status.success() { bail!("the game's PhysX cooking failed: {}", String::from_utf8_lossy(&r.stderr).trim()); }
-    let d = std::fs::read(&out)?;
+    let r = cmd.output().context("run g3cook.exe");
+    let d = std::fs::read(&out);
     let _ = std::fs::remove_dir_all(&dir);
+    let r = r?;
+    if !r.status.success() { bail!("the game's PhysX cooking failed: {}", String::from_utf8_lossy(&r.stderr).trim()); }
+    let d = d?;
     let n = u32::from_le_bytes(d[0..4].try_into().unwrap()) as usize;
     if n != meshes.len() { bail!("g3cook returned {n} streams for {} meshes", meshes.len()); }
     let mut o = 4;
@@ -247,18 +292,27 @@ pub fn xnvmsh_write(x: &crate::g3_res::Xnv) -> Vec<u8> {
     o
 }
 
-/// `x` in the game's own file `template` (GENOMFLE): its head and string table, our streams and tail.
+/// `x` in the game's own file `template`: its head (and, in a GENOMFLE file, its string table), our streams and tail.
+/// The game keeps both forms (about half of the convex `*_CV` files are plain).
 pub fn xnvmsh_in(template: &[u8], x: &crate::g3_res::Xnv) -> Result<Vec<u8>> {
-    if !template.starts_with(b"GENOMFLE") { bail!("collision template is not GENOMFLE"); }
     let p0 = template.windows(4).position(|w| w == b"NXS\x01").context("collision template has no stream")?;
-    let tab = u32::from_le_bytes(template[10..14].try_into().unwrap()) as usize;
+    if p0 < 17 { bail!("collision template: stream at 0x{p0:x}"); }
     let mut o = template[..p0 - 12].to_vec();
     o[p0 - 17] = x.convex;
     o.extend(xnvmsh_body(x));
-    let new_tab = o.len() as u32;
-    o.extend(&template[tab..]);
-    o[10..14].copy_from_slice(&new_tab.to_le_bytes());
-    o[29..33].copy_from_slice(&(new_tab - 33).to_le_bytes());
+    if template.starts_with(b"GENOMFLE") {
+        let tab = u32::from_le_bytes(template[10..14].try_into().unwrap()) as usize;
+        let new_tab = o.len() as u32;
+        o.extend(template.get(tab..).context("collision template: string table past the end")?);
+        o[10..14].copy_from_slice(&new_tab.to_le_bytes());
+        o[29..33].copy_from_slice(&(new_tab - 33).to_le_bytes());
+    } else {
+        // Plain: the size of the rest sits after the class name and its version words, as `xnvmsh_write` puts it.
+        let size = template.get(41..45).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize);
+        if template.get(8..34) != Some(&b"eCResourceCollisionMesh_PS"[..]) || size != Some(template.len() - 45) { bail!("collision template: unknown plain head"); }
+        let rest = (o.len() - 45) as u32;
+        o[41..45].copy_from_slice(&rest.to_le_bytes());
+    }
     Ok(o)
 }
 
@@ -314,5 +368,27 @@ mod collision_game_tests {
             n += 1;
         }
         assert!(n > 500, "{n} files");
+    }
+
+    /// Every collision file of the game models use, either form, with triangle meshes or hulls, comes back byte for
+    /// byte when written into itself — the frame `xnvmsh_in` puts our streams in.
+    #[test]
+    fn every_collision_rewrites_into_itself() {
+        let Ok(root) = std::env::var("G3_GAME") else { return };
+        let g = crate::g3::G3Ctx::open(std::path::Path::new(&root)).unwrap();
+        let (mut plain, mut genome, mut bad) = (0, 0, vec![]);
+        for k in g.keys().into_iter().filter(|k| k.ends_with("_col.xnvmsh") || k.ends_with("_cv.xnvmsh")) {
+            let d = g.read(&k).unwrap();
+            let x = crate::g3_res::parse_xnvmsh(&d).unwrap();
+            // The few older plain files without a shape table are written in today's form.
+            if !d.starts_with(b"GENOMFLE") && x.shapes.is_empty() && super::xnvmsh_in(&d, &x).is_ok_and(|o| o.len() == d.len() + 5) { continue; }
+            match super::xnvmsh_in(&d, &x) {
+                Ok(o) if o == d => if d.starts_with(b"GENOMFLE") { genome += 1 } else { plain += 1 },
+                Ok(_) => bad.push(format!("{k}: differs")),
+                Err(e) => bad.push(format!("{k}: {e:#}")),
+            }
+        }
+        assert!(bad.is_empty(), "{} of them, e.g. {:#?}", bad.len(), &bad[..bad.len().min(6)]);
+        assert!(plain > 300 && genome > 1000, "{plain} plain, {genome} GENOMFLE");
     }
 }

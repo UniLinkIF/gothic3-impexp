@@ -53,3 +53,12 @@ def run(*args):
     if r.returncode != 0:
         raise CoreError(r.stderr.strip() or f"gothic3-core завершився з кодом {r.returncode}")
     return json.loads(r.stdout)
+
+
+def package_dir(folder, name):
+    """Where a mod package goes: the folder picked in the dialog, else the mods folder from the preferences, else the
+    cache's `mods` folder (never the export's own temporary folder, which is deleted afterwards)."""
+    import bpy
+    if folder:
+        return bpy.path.abspath(folder)
+    return os.path.join(bpy.path.abspath(prefs().mods_dir) if prefs().mods_dir else os.path.join(cache_dir(), "mods"), name)

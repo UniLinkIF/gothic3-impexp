@@ -3,10 +3,12 @@
 // GPL-3.0-or-later with additional terms (see NOTICE). The PhysX library is the player's own, loaded from the game
 // folder; it is not shipped.
 //
-//   g3cook.exe <game folder> <in.bin> <out.bin>
+//   g3cook.exe <game folder> <in.bin> <out.bin> [convex]
 //   in : u32 meshes · per mesh: u32 vertices · u32 triangles · f32 xyz[vertices] (metres) · u32 abc[triangles]
 //        · u16 material[triangles] (the game's own streams carry 1 on every triangle)
 //   out: u32 meshes · per mesh: u32 bytes · the cooked stream ("NXS\x01MESH" ...)
+//   convex: each mesh becomes the convex hull of its vertices ("NXS\x01CVXM" ..., the *_CV bodies of items); its
+//        triangles are not used.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -17,6 +19,7 @@ static class G3Cook
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool SetDllDirectory(string path);
     [DllImport("NxCooking.dll", EntryPoint = "_NxInitCooking@8", CallingConvention = CallingConvention.StdCall)] static extern bool NxInitCooking(IntPtr allocator, IntPtr output);
     [DllImport("NxCooking.dll", EntryPoint = "_NxCookTriangleMesh@8", CallingConvention = CallingConvention.StdCall)] static extern bool NxCookTriangleMesh(IntPtr desc, IntPtr stream);
+    [DllImport("NxCooking.dll", EntryPoint = "_NxCookConvexMesh@8", CallingConvention = CallingConvention.StdCall)] static extern bool NxCookConvexMesh(IntPtr desc, IntPtr stream);
     [DllImport("NxCooking.dll", EntryPoint = "_NxCloseCooking@0", CallingConvention = CallingConvention.StdCall)] static extern void NxCloseCooking();
 
     // NxStream: a C++ interface, called with thiscall through its vtable.
@@ -61,7 +64,8 @@ static class G3Cook
 
     static int Main(string[] args)
     {
-        if (args.Length != 3) { Console.Error.WriteLine("g3cook <game folder> <in.bin> <out.bin>"); return 2; }
+        bool convex = args.Length == 4 && args[3] == "convex";
+        if (args.Length != 3 && !convex) { Console.Error.WriteLine("g3cook <game folder> <in.bin> <out.bin> [convex]"); return 2; }
         if (IntPtr.Size != 4) { Console.Error.WriteLine("g3cook must run as a 32-bit process"); return 2; }
         if (!File.Exists(Path.Combine(args[0], "NxCooking.dll"))) { Console.Error.WriteLine("NxCooking.dll not found in " + args[0]); return 2; }
         SetDllDirectory(args[0]);
@@ -77,24 +81,36 @@ static class G3Cook
             byte[] pts = input.ReadBytes((int)nv * 12), tris = input.ReadBytes((int)nt * 12), mats = input.ReadBytes((int)nt * 2);
             IntPtr p = Marshal.AllocHGlobal(pts.Length), t = Marshal.AllocHGlobal(tris.Length), mt = Marshal.AllocHGlobal(Math.Max(2, mats.Length));
             Marshal.Copy(pts, 0, p, pts.Length); Marshal.Copy(tris, 0, t, tris.Length); Marshal.Copy(mats, 0, mt, mats.Length);
-            // NxTriangleMeshDesc (PhysX 2.x, no vtable): NxSimpleTriangleMesh then the triangle-mesh fields.
             IntPtr desc = Marshal.AllocHGlobal(256);
             for (int i = 0; i < 256; i += 4) Marshal.WriteInt32(desc, i, 0);
-            Marshal.WriteInt32(desc, 0, (int)nv);
-            Marshal.WriteInt32(desc, 4, (int)nt);
-            Marshal.WriteInt32(desc, 8, 12);
-            Marshal.WriteInt32(desc, 12, 12);
-            Marshal.WriteIntPtr(desc, 16, p);
-            Marshal.WriteIntPtr(desc, 20, t);
-            Marshal.WriteInt32(desc, 24, 0);                       // flags: 32-bit indices
-            Marshal.WriteInt32(desc, 28, 2);                       // materialIndexStride: u16
-            Marshal.WriteIntPtr(desc, 32, mt);                     // materialIndices
-            Marshal.WriteInt32(desc, 36, 0xff);                    // heightFieldVerticalAxis: none
-            Marshal.WriteInt32(desc, 40, 0);                       // heightFieldVerticalExtent
-            Marshal.WriteIntPtr(desc, 44, IntPtr.Zero);            // pmap
-            Marshal.WriteInt32(desc, 48, BitConverter.ToInt32(BitConverter.GetBytes(0.001f), 0));   // convexEdgeThreshold
             sink.SetLength(0);
-            if (!NxCookTriangleMesh(desc, stream)) { Console.Error.WriteLine("NxCookTriangleMesh failed for mesh " + m); return 1; }
+            if (convex)
+            {
+                // NxConvexMeshDesc: vertices, triangles (none: the hull is computed), strides, points, triangles, flags.
+                Marshal.WriteInt32(desc, 0, (int)nv);
+                Marshal.WriteInt32(desc, 8, 12);
+                Marshal.WriteIntPtr(desc, 16, p);
+                Marshal.WriteInt32(desc, 24, 4);                   // NX_CF_COMPUTE_CONVEX, as the game's own hulls
+                if (!NxCookConvexMesh(desc, stream)) { Console.Error.WriteLine("NxCookConvexMesh failed for mesh " + m + " (" + nv + " vertices): too complex a hull?"); return 1; }
+            }
+            else
+            {
+                // NxTriangleMeshDesc (PhysX 2.x, no vtable): NxSimpleTriangleMesh then the triangle-mesh fields.
+                Marshal.WriteInt32(desc, 0, (int)nv);
+                Marshal.WriteInt32(desc, 4, (int)nt);
+                Marshal.WriteInt32(desc, 8, 12);
+                Marshal.WriteInt32(desc, 12, 12);
+                Marshal.WriteIntPtr(desc, 16, p);
+                Marshal.WriteIntPtr(desc, 20, t);
+                Marshal.WriteInt32(desc, 24, 0);                       // flags: 32-bit indices
+                Marshal.WriteInt32(desc, 28, 2);                       // materialIndexStride: u16
+                Marshal.WriteIntPtr(desc, 32, mt);                     // materialIndices
+                Marshal.WriteInt32(desc, 36, 0xff);                    // heightFieldVerticalAxis: none
+                Marshal.WriteInt32(desc, 40, 0);                       // heightFieldVerticalExtent
+                Marshal.WriteIntPtr(desc, 44, IntPtr.Zero);            // pmap
+                Marshal.WriteInt32(desc, 48, BitConverter.ToInt32(BitConverter.GetBytes(0.001f), 0));   // convexEdgeThreshold
+                if (!NxCookTriangleMesh(desc, stream)) { Console.Error.WriteLine("NxCookTriangleMesh failed for mesh " + m); return 1; }
+            }
             byte[] cooked = sink.ToArray();
             output.Write((uint)cooked.Length);
             output.Write(cooked);

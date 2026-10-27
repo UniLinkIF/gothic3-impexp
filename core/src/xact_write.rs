@@ -255,7 +255,7 @@ pub fn build(g: &crate::g3::G3Ctx, spec: &ActorSpec) -> Result<(ActorReport, Vec
     let mut notes = vec![];
     let mut mats = vec![];
     for m in &spec.materials {
-        let clean = |s: &str| -> String { let b = match s.rsplit_once('.') { Some((a, x)) if x.len() == 3 && x.bytes().all(|c| c.is_ascii_digit()) => a, _ => s }; b.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect() };
+        let clean = crate::export::clean;
         let name = clean(&m.name);
         if let Some(own) = base.materials.iter().find(|x| clean(&x.name).eq_ignore_ascii_case(&name)) {
             notes.push(format!("{name}: kept"));

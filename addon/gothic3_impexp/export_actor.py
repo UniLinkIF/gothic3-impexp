@@ -8,6 +8,7 @@ alone and it replaces that head. Same name as the base = replace it.
 
 import json
 import os
+import shutil
 import tempfile
 
 import bpy
@@ -16,7 +17,6 @@ from bpy.props import EnumProperty, FloatProperty, StringProperty
 
 from . import core
 from .export_mesh import _material_spec
-from .prefs import prefs
 
 
 def _armature_of(ob):
@@ -42,12 +42,17 @@ def gather_skinned(context, objects, scale, tmp):
         dg.update()
         pos, cv, nrm, uv, mat, weights = [], [], [], [], [], []
         bones, bone_of, materials, slot_of = [], {}, [], {}
-        vbase = 0
+        vbase, unweighted = 0, 0
         for ob in objects:
             ev = ob.evaluated_get(dg)
             me = ev.to_mesh()
             try:
-                me.transform(ob.matrix_world)
+                # Into the armature's space: the game keeps the base actor's skeleton where it is, so where the
+                # character stands in the scene must not move its skin.
+                m = _armature_of(ob).matrix_world.inverted() @ ob.matrix_world
+                me.transform(m)
+                if m.determinant() < 0:
+                    me.flip_normals()
                 me.calc_loop_triangles()
                 nt, nv = len(me.loop_triangles), len(me.vertices)
                 if nt == 0:
@@ -81,8 +86,7 @@ def gather_skinned(context, objects, scale, tmp):
                     remap.append(slot_of[key])
                 mat.append(np.array(remap, np.uint32)[np.clip(mi, 0, len(remap) - 1)])
                 groups = {g.index: g.name for g in ob.vertex_groups}
-                src = me if len(me.vertices) == nv else ob.data
-                for v in src.vertices:
+                for v in me.vertices:
                     w = sorted(((g.weight, groups.get(g.group)) for g in v.groups if g.weight > 0 and groups.get(g.group)), reverse=True)[:8]
                     row = []
                     for weight, name in w:
@@ -91,6 +95,8 @@ def gather_skinned(context, objects, scale, tmp):
                             bones.append(name)
                         row.append((bone_of[name], weight))
                     weights.append(row)
+                    if not row:
+                        unweighted += 1
                 vbase += nv
             finally:
                 ev.to_mesh_clear()
@@ -105,7 +111,7 @@ def gather_skinned(context, objects, scale, tmp):
             packed[i, 2 * k] = b
             packed[i, 2 * k + 1] = np.float32(w).view(np.uint32)
     return (np.concatenate(pos).astype(np.float32), np.concatenate(cv).astype(np.uint32), np.concatenate(nrm).astype(np.float32),
-            np.concatenate(uv).astype(np.float32), np.concatenate(mat).astype(np.uint32), packed, bones, materials)
+            np.concatenate(uv).astype(np.float32), np.concatenate(mat).astype(np.uint32), packed, bones, materials, unweighted)
 
 
 class G3_OT_export_actor(bpy.types.Operator):
@@ -113,13 +119,13 @@ class G3_OT_export_actor(bpy.types.Operator):
     bl_label = "Gothic 3 Actor → Mod (.xact)"
     bl_description = "Виділені меші на скелеті Gothic 3 → актор гри (нова броня, тіло, голова); скелет і решта — з базового актора"
 
-    name: StringProperty(name="Назва актора", description="Назва базового актора — заміна (напр. G3_Hero_Body_Player); нова назва — новий актор поруч")
+    name: StringProperty(name="Назва актора", description="Назва базового актора — заміна (напр. G3_Hero_Body_Player); нова назва — новий актор поруч", options={"SKIP_SAVE"})
     mode: EnumProperty(name="Куди", items=(
         ("install", "Встановити в гру", "Одразу в гру (том-латка); прибрати — панель Gothic 3"),
         ("package", "Пакет мода", "Папка з томами, INSTALL.bat і ROLLBACK.bat"),
     ), default="install")
     folder: StringProperty(name="Папка пакета", subtype="DIR_PATH")
-    title: StringProperty(name="Назва мода")
+    title: StringProperty(name="Назва мода", options={"SKIP_SAVE"})
     scale: FloatProperty(name="Масштаб", default=0.01, min=1e-6)
 
     @classmethod
@@ -147,24 +153,27 @@ class G3_OT_export_actor(bpy.types.Operator):
             self.report({"ERROR"}, f"Виділіть меші одного актора (зараз: {', '.join(sorted(bases)) or 'жодного'}) — тіло й голову експортують окремо")
             return {"CANCELLED"}
         tmp = tempfile.mkdtemp(prefix="g3_actor_")
-        g = gather_skinned(context, objects, self.scale, tmp)
-        if g is None:
-            self.report({"ERROR"}, "У виділених мешах немає трикутників")
-            return {"CANCELLED"}
-        pos, cv, nrm, uv, mat, packed, bones, materials = g
-        if not bones:
-            self.report({"ERROR"}, "Жодна вершина не має ваг кісток (групи вершин з назвами кісток)")
-            return {"CANCELLED"}
-        geo = os.path.join(tmp, "skin.bin")
-        with open(geo, "wb") as f:
-            for a in (pos, cv, nrm, uv, mat, packed):
-                f.write(np.ascontiguousarray(a).tobytes())
-        spec = os.path.join(tmp, "spec.json")
-        with open(spec, "w", encoding="utf-8") as f:
-            json.dump({"base": bases.pop(), "name": self.name, "geometry": geo, "vertices": len(pos), "corners": len(cv), "bones": bones, "materials": materials}, f)
         try:
+            g = gather_skinned(context, objects, self.scale, tmp)
+            if g is None:
+                self.report({"ERROR"}, "У виділених мешах немає трикутників")
+                return {"CANCELLED"}
+            pos, cv, nrm, uv, mat, packed, bones, materials, unweighted = g
+            if not bones:
+                self.report({"ERROR"}, "Жодна вершина не має ваг кісток (групи вершин з назвами кісток)")
+                return {"CANCELLED"}
+            if unweighted:
+                self.report({"ERROR"}, f"{unweighted} вершин без ваг кісток — у грі вони відірвуться від тіла; призначте їх групам вершин кісток")
+                return {"CANCELLED"}
+            geo = os.path.join(tmp, "skin.bin")
+            with open(geo, "wb") as f:
+                for a in (pos, cv, nrm, uv, mat, packed):
+                    f.write(np.ascontiguousarray(a).tobytes())
+            spec = os.path.join(tmp, "spec.json")
+            with open(spec, "w", encoding="utf-8") as f:
+                json.dump({"base": bases.pop(), "name": self.name, "geometry": geo, "vertices": len(pos), "corners": len(cv), "bones": bones, "materials": materials}, f)
             if self.mode == "package":
-                folder = bpy.path.abspath(self.folder) if self.folder else os.path.join(prefs().mods_dir or tmp, self.name)
+                folder = core.package_dir(self.folder, self.name)
                 out = core.run("export-actor", core.game_dir(), spec, "package", folder, self.title or self.name)
             else:
                 out = core.run("export-actor", core.game_dir(), spec, "install", self.name)
@@ -173,6 +182,8 @@ class G3_OT_export_actor(bpy.types.Operator):
         except core.CoreError as e:
             self.report({"ERROR"}, str(e))
             return {"CANCELLED"}
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
         r = out["report"]
         what = "замінено" if r["replaced"] else "новий"
         self.report({"INFO"}, f"{r['actor']} ({what}): {r['vertices']} вершин, {r['triangles']} трикутників; {'; '.join(r['notes'])}")

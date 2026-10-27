@@ -6,7 +6,7 @@
 //! gothic3-core keys <game> <prefix>                         archive keys starting with prefix (debugging)
 //! gothic3-core find <game> mesh|actor|motion                [name, folder] of every resource of that kind
 //! gothic3-core mesh <game> <name> <out dir>                 static mesh as OBJ + MTL + PNG
-//! gothic3-core collision <game> <name> <out.obj>            the mesh's collision
+//! gothic3-core collision <game> <name> <out.obj> [convex]   the mesh's collision (or its *_CV hull)
 //! gothic3-core actor <game> <name> <out.glb> <clips> [limit] [full|skeleton] [head]
 //!                                                           actor (+ clips: "" none, "@file" names, words; a head actor
 //!                                                           put on a body by bone name; skeleton = no textures)
@@ -105,7 +105,7 @@ fn run(args: &[String]) -> Result<serde_json::Value> {
             let g = open(game)?;
             serde_json::to_value(staticmesh::export_obj(&g, a(3).context("mesh name")?, Path::new(a(4).context("out dir")?))?)?
         }
-        (Some("collision"), Some(game)) => staticmesh::collision_obj(&open(game)?, a(3).context("mesh name")?, Path::new(a(4).context("out.obj")?))?,
+        (Some("collision"), Some(game)) => staticmesh::collision_obj(&open(game)?, a(3).context("mesh name")?, Path::new(a(4).context("out.obj")?), a(5) == Some("convex"))?,
         (Some("clips"), Some(game)) => serde_json::to_value(clips_for(&open(game)?, a(3).context("actor")?, a(4).unwrap_or(""), a(5).and_then(|x| x.parse().ok()).unwrap_or(500))?)?,
         (Some("actor"), Some(game)) => {
             let g = open(game)?;
@@ -173,7 +173,7 @@ fn run(args: &[String]) -> Result<serde_json::Value> {
             }
             out
         }
-        (Some("installed"), Some(game)) => serde_json::to_value(mods::installed(Path::new(game)))?,
+        (Some("installed"), Some(game)) => serde_json::to_value(mods::installed(Path::new(game))?)?,
         (Some("uninstall"), Some(game)) => { mods::uninstall(Path::new(game), a(3).context("mod name")?)?; serde_json::json!(true) }
         _ => bail!("usage: gothic3-core keys|find|mesh|collision|clips|actor|export|installed|uninstall <game folder> …"),
     })

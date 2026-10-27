@@ -15,21 +15,22 @@ Import and export **Gothic 3** (Piranha Bytes, 2006, Genome engine) models, char
 
 | Entry | Game files | Comes in as |
 |---|---|---|
-| Gothic 3 Model | `.xcmsh` + `.xshmat` + `.ximg` | mesh with textures (positions welded, uv/normal seams kept), alpha test/blend and specular set up, and its collision as a wireframe `<name>_COL` child. Categories: items, buildings, decor and furniture, plants, locations, landscape, water, technical |
+| Gothic 3 Model | `.xcmsh` + `.xshmat` + `.ximg` | mesh with textures (positions welded, uv/normal seams kept), alpha test/blend and specular set up, and its collision as a wireframe `<name>_COL` child (an item's convex body as `<name>_CV`). Categories: items, buildings, decor and furniture, plants, locations, landscape, water, technical |
 | Gothic 3 Character | `.xact` | armature (bones as sticks) and skinned mesh, no animation; a human body with the head of your choice (the Nameless Hero's by default). Categories: humans — body or head, animals and monsters, items and objects |
 | Gothic 3 Animations | `.xmot` | animations onto the selected Gothic 3 skeleton: one clip or a whole category — idle, movement, attacks, defence, dialogue and gestures, sitting and lying, interaction, death |
-| Gothic 3 Collision | `.xnvmsh` | only the collision, as a wireframe mesh; one `G3_Shape_<surface>` material per surface (stone, wood, earth…). A landscape cell's collision is its own triangles |
+| Gothic 3 Collision | `.xnvmsh` | only the collision, as a wireframe mesh; one `G3_Shape_<surface>` material per surface (stone, wood, earth…), and an item's convex body. A landscape cell's collision is its own triangles |
 
 **File → Export** (install into the game, or build a mod package with `INSTALL.bat` / `ROLLBACK.bat`):
 
 | Entry | Writes |
 |---|---|
-| Gothic 3 Model → Mod | `.xcmsh` replacing the game's mesh of the same name or a new one, new materials (`.xshmat` from game templates: opaque, specular, alpha test) and images (`.ximg`), collision (`.xnvmsh`, from the `*_COL` objects or the model itself; for the landscape always from the model) with surfaces by material. Replacing a game model takes its vertex colours and lighting (the lightmaps of all its placements in the world) from the nearest old vertices, and replaces its `_lod1` too |
+| Gothic 3 Model → Mod | `.xcmsh` replacing the game's mesh of the same name or a new one, new materials (`.xshmat` from game templates: opaque, specular, alpha test) and images (`.ximg`), collision (`.xnvmsh`, from the `*_COL` objects or the model itself; for the landscape always from the model) with surfaces by material, and an item's convex body (`*_CV`, from the `*_CV` objects or the model's own shape). Replacing a game model takes its vertex colours and lighting (the lightmaps of all its placements in the world) from the nearest old vertices, and replaces its `_lod1` too |
 | Gothic 3 Motion → Mod | a `.xmot` replacing one of the game's clips (by default the one the action came from) or a new clip beside it; IK and other constraints go in as their result; frame effects (footsteps, sounds) from the action's list, edited in the Gothic 3 tab |
 | Gothic 3 Actor → Mod | a `.xact` — your mesh on a game skeleton (armour, bodies, heads, creatures with one mesh), weights from vertex groups |
 
 Mods go into the game as a patch volume per archive (`Data\_compiledMesh.pNN` and so on, after the game's own), the way
-the game's patches do; the archives themselves are never changed. The **Gothic 3** tab lists the mods installed from
+the game's patches do; the archives themselves are never changed. The game stops mounting at the first missing number,
+so the numbers never get a gap: a volume emptied below another stays, empty, until it is the last. The **Gothic 3** tab lists the mods installed from
 Blender with a button to remove each.
 
 The **Gothic 3** tab in the 3D view sidebar has all of these and, with a Gothic 3 armature selected, an
@@ -40,7 +41,7 @@ pose.
 ## Install
 
 1. Blender 5.1 or newer.
-2. *Edit → Preferences → Get Extensions → ⌄ → Install from Disk…* → `gothic3_impexp-0.9.5.zip`.
+2. *Edit → Preferences → Get Extensions → ⌄ → Install from Disk…* → `gothic3_impexp-0.9.6.zip`.
 3. In the add-on's preferences check **Gothic 3 game folder** (the one with `Gothic3.exe`; the Steam default is
    filled in).
 
@@ -69,7 +70,8 @@ Installed mods live in `Gothic 3\gothic3_impexp\` (their files and a list) plus 
   materials, an object's its surfaces (the water mill: stone, then wood). A surface the game's collision of that model
   does not have goes with its first part (the export says so), and a part that would stay empty keeps one triangle.
   The world also keeps each part's old box: the export warns when a part grows well past it.
-- Small items keep the game's convex physics shape (`*_CV`): only triangle-mesh collision is written.
+- An item's convex body (`*_CV`, what it has when it lies, falls and rolls) is cooked by the game's PhysX too: one hull per
+  `*_CV` object, or the hull of the model itself.
 - A new motion takes a game clip as its template (its bones and structure); actors only replace (or sit beside) a
   one-mesh actor of the game.
 - A new model or actor shows up in the game only once something places or references it.

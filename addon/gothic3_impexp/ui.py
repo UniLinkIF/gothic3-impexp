@@ -4,13 +4,15 @@ from Blender with a button to remove each."""
 import bpy
 from bpy.props import StringProperty
 
-from . import core
+from . import catalog, core, import_actor
 
 _installed = None
 
 
 def refresh():
     global _installed
+    catalog.reset()
+    import_actor._clip_cache.clear()
     try:
         _installed = core.run("installed", core.game_dir())
     except core.CoreError:

@@ -86,21 +86,27 @@ def clip_category(name):
     return "interact" if "_use" in n or "interact" in n else "other"
 
 
-_meshes = _actors = None
+# The game's lists, per game folder; `reset` after installing or removing a mod (new models show up).
+_meshes, _actors = {}, {}
+
+
+def reset():
+    _meshes.clear()
+    _actors.clear()
 
 
 def meshes():
-    global _meshes
-    if _meshes is None:
-        _meshes = [(n, f, mesh_category(f)) for n, f in core.run("find", core.game_dir(), "mesh")]
-    return _meshes
+    g = core.game_dir()
+    if g not in _meshes:
+        _meshes[g] = [(n, f, mesh_category(f)) for n, f in core.run("find", g, "mesh")]
+    return _meshes[g]
 
 
 def actors():
-    global _actors
-    if _actors is None:
-        _actors = [(n, f, actor_category(n)) for n, f in core.run("find", core.game_dir(), "actor")]
-    return _actors
+    g = core.game_dir()
+    if g not in _actors:
+        _actors[g] = [(n, f, actor_category(n)) for n, f in core.run("find", g, "actor")]
+    return _actors[g]
 
 
 def enum_items(categories):

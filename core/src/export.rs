@@ -37,13 +37,18 @@ pub struct CollisionSpec {
     #[serde(default)] pub mode: Option<String>,
     /// The collision objects' materials, indexed by the geometry's per-triangle material.
     #[serde(default)] pub materials: Vec<MatSpec>,
+    /// Convex hulls (`*_CV` objects), one per part: geometry files like the collision's.
+    #[serde(default)] pub convex: Vec<ConvexSpec>,
 }
+
+#[derive(Deserialize)]
+pub struct ConvexSpec { pub geometry: String, pub corners: usize }
 
 #[derive(Deserialize)]
 pub struct Spec { pub name: String, pub geometry: String, pub corners: usize, pub materials: Vec<MatSpec>, pub collision: Option<CollisionSpec> }
 
 #[derive(serde::Serialize, Default)]
-pub struct Report { pub name: String, pub replaced: bool, pub vertices: usize, pub triangles: usize, pub materials: Vec<String>, pub collision: Option<String>, pub lightmaps: usize, pub lods: Vec<String>, pub files: Vec<String>, pub warnings: Vec<String> }
+pub struct Report { pub name: String, pub replaced: bool, pub vertices: usize, pub triangles: usize, pub materials: Vec<String>, pub collision: Option<String>, pub convex: Option<String>, pub lightmaps: usize, pub lods: Vec<String>, pub files: Vec<String>, pub warnings: Vec<String> }
 
 /// Corner arrays: positions f32×3, normals f32×3, uvs f32×2 (V down), material u32 per triangle.
 fn read_geometry(path: &str, corners: usize) -> Result<(Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>)> {
@@ -62,9 +67,34 @@ fn read_geometry(path: &str, corners: usize) -> Result<(Vec<[f32; 3]>, Vec<[f32;
     Ok((pos, nrm, uv, mat))
 }
 
-fn clean(s: &str) -> String {
+/// A name the game's files can carry: Latin letters, digits and `_`, without Blender's `.001`. Cyrillic is
+/// transliterated; anything else that is lost gets a short hash of the whole name, so two names never become one.
+pub(crate) fn clean(s: &str) -> String {
     let base = match s.rsplit_once('.') { Some((a, b)) if b.len() == 3 && b.bytes().all(|c| c.is_ascii_digit()) => a, _ => s };
-    base.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect()
+    let mut out = String::new();
+    let mut lost = false;
+    for c in base.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' { out.push(c); continue; }
+        let lower: String = c.to_lowercase().collect();
+        match translit(&lower) {
+            Some(t) if c.is_uppercase() => { let mut cs = t.chars(); if let Some(f) = cs.next() { out.push(f.to_ascii_uppercase()); out.extend(cs); } }
+            Some(t) => out.push_str(t),
+            None => { lost |= !c.is_ascii(); out.push('_'); }
+        }
+    }
+    if lost { out += &format!("_{:06x}", hash(base.as_bytes()) & 0xffffff); }
+    out
+}
+
+/// Ukrainian (and Russian) letters in Latin, as Ukraine's official transliteration writes them.
+fn translit(c: &str) -> Option<&'static str> {
+    Some(match c {
+        "а" => "a", "б" => "b", "в" => "v", "г" => "h", "ґ" => "g", "д" => "d", "е" => "e", "є" => "ie", "ж" => "zh", "з" => "z",
+        "и" => "y", "і" => "i", "ї" => "i", "й" => "i", "к" => "k", "л" => "l", "м" => "m", "н" => "n", "о" => "o", "п" => "p",
+        "р" => "r", "с" => "s", "т" => "t", "у" => "u", "ф" => "f", "х" => "kh", "ц" => "ts", "ч" => "ch", "ш" => "sh",
+        "щ" => "shch", "ь" | "ъ" | "'" | "’" => "", "ю" => "iu", "я" => "ia", "ё" => "io", "ы" => "y", "э" => "e",
+        _ => return None,
+    })
 }
 
 fn hash(bytes: &[u8]) -> u64 { bytes.iter().fold(0xcbf29ce484222325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x100000001b3)) }
@@ -120,32 +150,44 @@ fn shape_of(m: &MatSpec, default: u8) -> u8 {
 }
 
 /// Nearest point among some of `pts`, on a uniform grid.
-struct Nearest<'a> { pts: &'a [[f32; 3]], empty: bool, cell: f32, grid: HashMap<[i32; 3], Vec<u32>> }
+struct Nearest<'a> { pts: &'a [[f32; 3]], ids: Vec<u32>, cell: f32, grid: HashMap<[i32; 3], Vec<u32>>, lo: [i32; 3], hi: [i32; 3] }
 
 impl<'a> Nearest<'a> {
-    fn new(pts: &'a [[f32; 3]], ids: impl Iterator<Item = u32> + Clone) -> Self {
-        let (mut lo, mut hi, mut n) = ([f32::MAX; 3], [f32::MIN; 3], 0usize);
-        for i in ids.clone() { let p = pts[i as usize]; n += 1; for k in 0..3 { lo[k] = lo[k].min(p[k]); hi[k] = hi[k].max(p[k]); } }
+    fn new(pts: &'a [[f32; 3]], ids: impl Iterator<Item = u32>) -> Self {
+        let ids: Vec<u32> = ids.collect();
+        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for &i in &ids { let p = pts[i as usize]; for k in 0..3 { lo[k] = lo[k].min(p[k]); hi[k] = hi[k].max(p[k]); } }
         let vol: f32 = (0..3).map(|k| (hi[k] - lo[k]).max(1.0)).product();
-        let cell = ((vol / n.max(1) as f32).cbrt() * 2.0).max(1.0);
+        let cell = ((vol / ids.len().max(1) as f32).cbrt() * 2.0).max(1.0);
         let mut grid: HashMap<[i32; 3], Vec<u32>> = HashMap::new();
-        for i in ids { grid.entry(Self::key(pts[i as usize], cell)).or_default().push(i); }
-        Nearest { pts, empty: n == 0, cell, grid }
+        for &i in &ids { grid.entry(Self::key(pts[i as usize], cell)).or_default().push(i); }
+        let (klo, khi) = if ids.is_empty() { ([0; 3], [-1; 3]) } else { (Self::key(lo, cell), Self::key(hi, cell)) };
+        Nearest { pts, ids, cell, grid, lo: klo, hi: khi }
     }
     fn key(p: [f32; 3], cell: f32) -> [i32; 3] { p.map(|x| (x / cell).floor() as i32) }
+    fn dist(&self, i: u32, p: [f32; 3]) -> f32 { let q = self.pts[i as usize]; (0..3).map(|k| (q[k] - p[k]).powi(2)).sum() }
     fn find(&self, p: [f32; 3]) -> Option<u32> {
-        if self.empty { return None; }
+        if self.ids.is_empty() { return None; }
         let c = Self::key(p, self.cell);
+        // Rings beyond this one hold no cell of the grid.
+        let last = (0..3).map(|k| (c[k] - self.lo[k]).abs().max((c[k] - self.hi[k]).abs())).max().unwrap_or(0);
         let mut best: Option<(f32, u32)> = None;
-        for r in 0i32..4096 {
+        for r in 0..=last {
             // Ring r holds every point closer than r cells; once the best is nearer than that, it is final.
             if let Some((b, _)) = best { if (r - 1) as f32 * self.cell > b.sqrt() { break; } }
-            for x in -r..=r { for y in -r..=r { for z in -r..=r {
+            // Only the part of the ring over the grid; when even that is more cells than there are points (a point far
+            // from a small part), looking at every point is cheaper.
+            let span = |k: usize| ((-r).max(self.lo[k] - c[k]), r.min(self.hi[k] - c[k]));
+            let (sx, sy, sz) = (span(0), span(1), span(2));
+            let cells = [sx, sy, sz].iter().map(|(a, b)| (b - a + 1).max(0) as u64).product::<u64>();
+            if cells > self.ids.len() as u64 * 4 {
+                return self.ids.iter().map(|&i| (self.dist(i, p), i)).chain(best).min_by(|a, b| a.0.total_cmp(&b.0)).map(|b| b.1);
+            }
+            for x in sx.0..=sx.1 { for y in sy.0..=sy.1 { for z in sz.0..=sz.1 {
                 if x.abs().max(y.abs()).max(z.abs()) != r { continue; }
                 let Some(v) = self.grid.get(&[c[0] + x, c[1] + y, c[2] + z]) else { continue };
                 for &i in v {
-                    let q = self.pts[i as usize];
-                    let d = (0..3).map(|k| (q[k] - p[k]).powi(2)).sum::<f32>();
+                    let d = self.dist(i, p);
                     if best.map_or(true, |(b, _)| d < b) { best = Some((d, i)); }
                 }
             } } }
@@ -395,6 +437,51 @@ pub fn build(g: &G3Ctx, spec: &Spec) -> Result<(Report, Vec<(String, String, Vec
                 }
                 None => r.collision = Some("the game's own collision stays".into()),
             }
+
+            // The convex collision (`*_CV`): the body an item has when it lies, falls and rolls. The game's is replaced
+            // (its parts in its order: one, in two files two) from the `*_CV` objects, one hull each, or else from the
+            // model's own vertices; a new model gets one only from `*_CV` objects.
+            let game_cv = crate::staticmesh::convex_key(g, &name);
+            let mut hulls: Vec<Vec<[f32; 3]>> = vec![];
+            if mode != "model" {
+                for h in &c.convex { hulls.push(read_geometry(&h.geometry, h.corners)?.0); }
+            }
+            if hulls.is_empty() && game_cv.is_some() { hulls.push(pos.clone()); }
+            if !hulls.is_empty() {
+                let from = if mode != "model" && !c.convex.is_empty() { "the *_CV objects" } else { "the model itself" };
+                let gx = match &game_cv { Some(k) => Some(crate::g3_res::parse_xnvmsh(&g.read(k)?).with_context(|| format!("{k}: the convex collision it replaces"))?), None => None };
+                let parts = gx.as_ref().map_or(hulls.len(), |x| x.streams.len().max(1));
+                if hulls.len() > parts {
+                    r.warnings.push(format!("convex collision: the game's has {parts} part(s) — the last takes the hull of the other {} *_CV objects too", hulls.len() - parts + 1));
+                    let rest: Vec<[f32; 3]> = hulls.drain(parts - 1..).flatten().collect();
+                    hulls.push(rest);
+                }
+                // One point per position (a mesh's corners repeat them).
+                for h in &mut hulls {
+                    let mut seen = std::collections::HashSet::new();
+                    h.retain(|p| seen.insert(p.map(f32::to_bits)));
+                }
+                let cooked = g3_write::convex_streams(&g.root, &hulls)?;
+                let boxed = |h: &[[f32; 3]]| { let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]); for v in h { for k in 0..3 { lo[k] = lo[k].min(v[k]); hi[k] = hi[k].max(v[k]); } } (lo, hi) };
+                let mut x = crate::g3_res::Xnv { streams: cooked.into_iter().zip(&hulls).map(|(s, h)| (s, boxed(h))).collect(), all: g3_write::EMPTY_BOX, convex: 1, shapes: vec![] };
+                let (cv_archive, cv_path, bytes) = match (&game_cv, &gx) {
+                    (Some(k), Some(gx)) => {
+                        // Parts with no *_CV object for them keep the game's.
+                        for (i, (st, b)) in gx.streams.iter().enumerate().skip(x.streams.len()) {
+                            r.warnings.push(format!("convex collision: part {i} of the game's stays as it is"));
+                            x.streams.push((st.clone(), *b));
+                        }
+                        x.shapes = gx.shapes.clone();
+                        x.convex = gx.convex;
+                        // The game's files mostly keep the box of all parts here.
+                        if gx.all.0[0] <= gx.all.1[0] { x.all = x.streams.iter().fold(g3_write::EMPTY_BOX, |a, (_, b)| ([0, 1, 2].map(|k| a.0[k].min(b.0[k])), [0, 1, 2].map(|k| a.1[k].max(b.1[k])))); }
+                        (archive_of(k).to_string(), g.path_of(k).unwrap_or(k).to_string(), g3_write::xnvmsh_in(&g.read(k)?, &x)?)
+                    }
+                    _ => ("_compiledPhysic".to_string(), format!("gothic3_impexp/{file_stem}_CV.xnvmsh"), g3_write::xnvmsh_write(&x)),
+                };
+                files.push((cv_archive, cv_path, bytes));
+                r.convex = Some(format!("{} part(s) from {from}: {} points", hulls.len(), hulls.iter().map(Vec::len).sum::<usize>()));
+            }
         }
     }
     r.files = files.iter().map(|(a, p, _)| format!("{a}/{p}")).collect();
@@ -417,6 +504,21 @@ pub fn run(g: &G3Ctx, game: &Path, spec_path: &str, mode: &str, arg: &str, title
 mod tests {
     use super::*;
 
+    /// The nearest vertex is the nearest one, and finding it stays quick for points far away from a small part.
+    #[test]
+    fn the_nearest_vertex_is_found_quickly_from_afar() {
+        let mut s = 7u32;
+        let mut rnd = || { s ^= s << 13; s ^= s >> 17; s ^= s << 5; (s % 10000) as f32 / 1000.0 };
+        let pts: Vec<[f32; 3]> = (0..2000).map(|_| [rnd(), rnd(), rnd()]).collect();
+        let near = Nearest::new(&pts, 0..pts.len() as u32);
+        let started = std::time::Instant::now();
+        for q in (0..300).map(|i| if i % 3 == 0 { [rnd() * 400.0, -rnd() * 300.0, rnd()] } else { [rnd(), rnd(), rnd()] }) {
+            let want = (0..pts.len()).min_by(|&a, &b| near.dist(a as u32, q).total_cmp(&near.dist(b as u32, q))).unwrap() as u32;
+            assert_eq!(near.dist(near.find(q).unwrap(), q), near.dist(want, q), "{q:?}");
+        }
+        assert!(started.elapsed().as_secs_f32() < 2.0, "{:?}", started.elapsed());
+    }
+
     /// A spec holding the game mesh `key` itself, as the add-on would send it.
     pub fn spec_of(g: &G3Ctx, key: &str, dir: &Path, collision: &str) -> Spec {
         let m = crate::g3_res::decode_xcmsh(&g.read(key).unwrap()).unwrap();
@@ -436,7 +538,7 @@ mod tests {
         std::fs::write(&geof, bytes).unwrap();
         let mats = || geo.submeshes.iter().map(|s| MatSpec { name: s.material.trim_end_matches(".xshmat").to_string(), diffuse: None, normal: None, specular: None, alpha_test: None, shape: None }).collect();
         Spec { name: crate::stem_of(key), geometry: geof.to_string_lossy().into_owned(), corners: t.len() * 3, materials: mats(),
-            collision: Some(CollisionSpec { geometry: None, corners: None, material: Some("stone".into()), mode: Some(collision.into()), materials: vec![] }) }
+            collision: Some(CollisionSpec { geometry: None, corners: None, material: Some("stone".into()), mode: Some(collision.into()), materials: vec![], convex: vec![] }) }
     }
 
     /// The landscape cell written back from its own triangles: same colours, its one lightmap rebuilt to the
@@ -516,6 +618,50 @@ mod tests {
         // The cooking drops the model's few degenerate triangles.
         assert!(tris <= r.triangles && tris * 1000 >= r.triangles * 999, "{tris} of {}: {:?}", r.triangles, r.collision);
         assert!(r.warnings.iter().any(|w| w.contains("debris")), "{:?}", r.warnings);
+    }
+
+    /// Names become file names without two of them ever becoming one: Cyrillic in Latin, anything else hashed.
+    #[test]
+    fn names_stay_apart() {
+        assert_eq!(clean("Млин"), "Mlyn");
+        assert_eq!(clean("Хата_Щука.001"), "Khata_Shchuka");
+        assert_eq!(clean("Barrel 02"), "Barrel_02");
+        assert_ne!(clean("日本"), clean("中国"));
+        assert!(clean("日本").starts_with("___"));
+    }
+
+    /// About a thousand models keep their collision as `_compiledPhysic/<name>.xnvmsh` (no `_COL`): a replaced one
+    /// writes that file, with the game's parts, not a new `_COL` nothing refers to.
+    #[test]
+    fn a_collision_without_col_in_its_name_is_replaced_where_it_is() {
+        let Ok(root) = std::env::var("G3_GAME") else { return };
+        let g = G3Ctx::open_original(Path::new(&root)).unwrap();
+        let key = crate::staticmesh::mesh_key(&g, "G3_Myrtana_Faring_Castle_Wall_Stairs_01").unwrap();
+        let (r, files) = build(&g, &spec_of(&g, &key, &std::env::temp_dir().join("g3ie_test_stairs"), "model")).unwrap();
+        let col = files.iter().find(|f| f.0 == "_compiledPhysic").unwrap_or_else(|| panic!("no collision: {:?}", r.files));
+        assert!(col.1.eq_ignore_ascii_case("G3_Myrtana_Faring_Castle_Wall_Stairs_01.xnvmsh") || col.1.to_lowercase().ends_with("/g3_myrtana_faring_castle_wall_stairs_01.xnvmsh"), "{}", col.1);
+        let gx = crate::g3_res::parse_xnvmsh(&g.read("_compiledphysic/g3_myrtana_faring_castle_wall_stairs_01.xnvmsh").unwrap()).unwrap();
+        let x = crate::g3_res::parse_xnvmsh(&col.2).unwrap();
+        assert_eq!((x.streams.len(), &x.shapes), (gx.streams.len(), &gx.shapes), "{:?}", r.collision);
+    }
+
+    /// An item replaced by its own model gets its convex body (`*_CV`) again, cooked by the game: a hull over the same
+    /// box as the game's, in the game's file.
+    #[test]
+    fn a_replaced_item_gets_its_convex_body_again() {
+        let Ok(root) = std::env::var("G3_GAME") else { return };
+        let g = G3Ctx::open_original(Path::new(&root)).unwrap();
+        let key = crate::staticmesh::mesh_key(&g, "G3_Armor_Helm_Myrtana_01").unwrap();
+        let (r, files) = build(&g, &spec_of(&g, &key, &std::env::temp_dir().join("g3ie_test_helm_cv"), "auto")).unwrap();
+        let cv = files.iter().find(|f| f.1.to_lowercase().ends_with("_cv.xnvmsh")).unwrap_or_else(|| panic!("no convex collision: {:?}", r.files));
+        assert_eq!(cv.0, "_compiledPhysic");
+        let (x, gx) = (crate::g3_res::parse_xnvmsh(&cv.2).unwrap(), crate::g3_res::parse_xnvmsh(&g.read(&crate::staticmesh::convex_key(&g, "G3_Armor_Helm_Myrtana_01").unwrap()).unwrap()).unwrap());
+        assert_eq!((x.streams.len(), x.convex, &x.shapes), (gx.streams.len(), gx.convex, &gx.shapes));
+        let (ours, game) = (crate::nxs::read_convex_hull(&x.streams[0].0).unwrap(), crate::nxs::read_convex_hull(&gx.streams[0].0).unwrap());
+        assert!(ours.1.len() >= 4, "{} hull triangles", ours.1.len());
+        let bx = |v: &[[f32; 3]]| (0..3).map(|k| (v.iter().map(|p| p[k]).fold(f32::MAX, f32::min), v.iter().map(|p| p[k]).fold(f32::MIN, f32::max))).collect::<Vec<_>>();
+        for (a, b) in bx(&ours.0).iter().zip(bx(&game.0)) { assert!((a.0 - b.0).abs() < 0.03 && (a.1 - b.1).abs() < 0.03, "box {:?} vs the game's {:?}", bx(&ours.0), bx(&game.0)); }
+        assert!(r.convex.as_deref().is_some_and(|c| c.contains("the model itself")), "{:?}", r.convex);
     }
 
     /// A landscape cell's parts are its mesh's elements: one painted with a material of its own still writes the

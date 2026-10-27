@@ -255,6 +255,8 @@ pub fn parse_xnvmsh(d: &[u8]) -> Result<Xnv> {
     x.all = bx(p + 6)?;
     for i in 0..n { x.streams[i].1 = bx(p + 30 + 24 * i)?; }
     let q = p + 30 + 24 * n;
+    // Older plain files end after the boxes, without the convex flag and the shape table.
+    if q == d.len() { return Ok(x); }
     x.convex = *d.get(q).ok_or_else(|| anyhow!("collision runs past the end"))?;
     for i in 0..u32_(q + 1)? as usize { x.shapes.push(get(q + 5 + 4 * i, 4)?.try_into().unwrap()); }
     Ok(x)
