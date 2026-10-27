@@ -9,6 +9,8 @@ BLENDER="${BLENDER:-blender}"
 # The collision cooker: a 32-bit helper that runs the game's own NxCooking.dll (built with the C# compiler of
 # .NET Framework 4, present on every Windows).
 ( cd cook32 && /c/Windows/Microsoft.NET/Framework/v4.0.30319/csc.exe -nologo -platform:x86 -optimize -out:g3cook.exe g3cook.cs )
+# The core looks for the helper next to itself first: keep that copy current too.
+cp cook32/g3cook.exe core/target/release/
 rm -rf dist/stage && mkdir -p dist/stage/bin
 cp addon/gothic3_impexp/*.py addon/gothic3_impexp/blender_manifest.toml dist/stage/
 cp core/target/release/gothic3-core.exe cook32/g3cook.exe dist/stage/bin/

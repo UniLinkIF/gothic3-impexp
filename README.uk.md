@@ -54,7 +54,7 @@ Zip містить `gothic3-core.exe` — нативну частину (Windows
 - **Змінити анімацію:** Import → Gothic 3 Character → істота, виділіть скелет, Import → Gothic 3 Animations. Змініть дію
   (допоможе риг для анімування), Export → Gothic 3 Motion: анімацію, з якої вона прийшла, уже вибрано.
 
-## Обмеження (0.9)
+## Обмеження
 
 - Меші пишуться як у гри (елементи версії 5 з кольорами вершин і деревом сфер), але без другого набору uv: освітлення
   заміненої моделі пишеться вершинним (так у грі три чверті лайтмап), навіть якщо в гри воно було сторінками-текстурами.
@@ -87,8 +87,12 @@ Zip містить `gothic3-core.exe` — нативну частину (Windows
 
 ```sh
 cd core && cargo build --release                          # gothic3-core.exe
+cd core && G3_GAME="<тека Gothic 3>" cargo test --release   # тести на файлах самої гри
 BLENDER=/path/to/blender.exe tools/build_release.sh       # dist/gothic3_impexp-<версія>.zip
+blender -b --factory-startup --python tools/blender_check.py -- <тимчасова тека>   # прогін аддона в Blender
 ```
+
+Що де перевірено й що відкрито — `STATUS.md`. Версії — `CHANGELOG.md`.
 
 ## Ліцензія
 

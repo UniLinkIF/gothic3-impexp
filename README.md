@@ -57,7 +57,7 @@ Installed mods live in `Gothic 3\gothic3_impexp\` (their files and a list) plus 
 - **Change an animation:** Import → Gothic 3 Character → the creature, select the armature, Import → Gothic 3
   Animations. Edit the action (the animation rig helps), Export → Gothic 3 Motion: the clip it came from is preselected.
 
-## Limits (0.9)
+## Limits
 
 - Meshes are written as the game's (version-5 elements with vertex colours and a sphere tree) but without a second uv
   set: a replaced model's lighting is written per vertex (as three in four of the game's lightmaps are), even where the
@@ -91,8 +91,12 @@ Installed mods live in `Gothic 3\gothic3_impexp\` (their files and a list) plus 
 
 ```sh
 cd core && cargo build --release                          # gothic3-core.exe
+cd core && G3_GAME="<Gothic 3 folder>" cargo test --release   # tests on the game's own files
 BLENDER=/path/to/blender.exe tools/build_release.sh       # dist/gothic3_impexp-<version>.zip
+blender -b --factory-startup --python tools/blender_check.py -- <scratch folder>   # a run through the add-on
 ```
+
+What is checked where, and what is open: `STATUS.md` (Ukrainian). Versions: `CHANGELOG.md`.
 
 ## License
 
