@@ -15,7 +15,8 @@
 //!         · f32 tangent[3][corners]
 //! ```
 //! Triangles: Gothic 3's actors keep the opposite order of its static meshes, so corners 1 and 2 swap.
-//! Only actors with one mesh can be a template (the human bodies, heads and most creatures).
+//! Every actor of the game has one mesh (374 of 374; the four others are bare skeletons), and several Blender objects
+//! come in as that one mesh with a material each.
 
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;

@@ -26,7 +26,7 @@ Import and export **Gothic 3** (Piranha Bytes, 2006, Genome engine) models, char
 |---|---|
 | Gothic 3 Model → Mod | `.xcmsh` replacing the game's mesh of the same name or a new one, new materials (`.xshmat` from game templates: opaque, specular, alpha test) and images (`.ximg`), collision (`.xnvmsh`, from the `*_COL` objects or the model itself; for the landscape always from the model) with surfaces by material, and an item's convex body (`*_CV`, from the `*_CV` objects or the model's own shape). Replacing a game model takes its vertex colours and lighting (the lightmaps of all its placements in the world) from the nearest old vertices, and replaces its `_lod1` too |
 | Gothic 3 Motion → Mod | a `.xmot` replacing one of the game's clips (by default the one the action came from) or a new clip beside it; IK and other constraints go in as their result; frame effects (footsteps, sounds) from the action's list, edited in the Gothic 3 tab |
-| Gothic 3 Actor → Mod | a `.xact` — your mesh on a game skeleton (armour, bodies, heads, creatures with one mesh), weights from vertex groups |
+| Gothic 3 Actor → Mod | a `.xact` — your mesh on a game skeleton (armour, bodies, heads, creatures; several Blender objects become its one mesh, a material each), weights from vertex groups |
 
 Mods go into the game as a patch volume per archive (`Data\_compiledMesh.pNN` and so on, after the game's own), the way
 the game's patches do; the archives themselves are never changed. The game stops mounting at the first missing number,
@@ -72,8 +72,8 @@ Installed mods live in `Gothic 3\gothic3_impexp\` (their files and a list) plus 
   The world also keeps each part's old box: the export warns when a part grows well past it.
 - An item's convex body (`*_CV`, what it has when it lies, falls and rolls) is cooked by the game's PhysX too: one hull per
   `*_CV` object, or the hull of the model itself.
-- A new motion takes a game clip as its template (its bones and structure); actors only replace (or sit beside) a
-  one-mesh actor of the game.
+- A new motion takes a game clip as its template (its bones and structure); a new actor takes a game actor as its
+  template (its skeleton; every actor of the game has one mesh, which several Blender objects become together).
 - A new model or actor shows up in the game only once something places or references it.
 
 ## Notes
