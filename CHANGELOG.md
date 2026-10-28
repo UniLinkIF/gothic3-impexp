@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.8 — 2026-10-28
+- **Import → Gothic 3 World Layer**: what the game places in one world layer (`.node`), and within a radius around it
+  the town's houses and rocks (the static cells, LoD sets shown at full detail) and the ground, as context to build
+  against. Each mesh is loaded once and linked at each placement; read only.
+
 ## 0.9.7 — 2026-10-27
 - Export to **one mod file** (`.g3mod`, the default): a ZIP with `mod.json` and the files under their archives, put into
   the game's `Mods` folder for a mod launcher to put in and take out. The author signing it is set in the preferences.

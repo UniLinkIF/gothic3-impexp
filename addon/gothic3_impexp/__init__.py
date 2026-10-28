@@ -18,9 +18,9 @@ bl_info = {
     "category": "Import-Export",
 }
 
-from . import prefs, materials, import_mesh, import_actor, export_mesh, export_motion, export_actor, rig, effects, ui, menus  # noqa: E402
+from . import prefs, materials, import_mesh, import_actor, world, export_mesh, export_motion, export_actor, rig, effects, ui, menus  # noqa: E402
 
-_modules = (prefs, materials, import_mesh, import_actor, export_mesh, export_motion, export_actor, rig, effects, ui, menus)
+_modules = (prefs, materials, import_mesh, import_actor, world, export_mesh, export_motion, export_actor, rig, effects, ui, menus)
 
 
 def register():

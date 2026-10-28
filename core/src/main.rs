@@ -23,6 +23,10 @@
 //!                                                           a skinned mesh on a game actor's skeleton
 //! gothic3-core installed <game>                             mods installed from Blender
 //! gothic3-core uninstall <game> <mod>                       remove one
+//! gothic3-core world-layers <game>                         the world layers (.node stems) to pick from
+//! gothic3-core world <game> <layer> <radius cm> <out dir> [noground]
+//!                                                           a layer as context: its placements and, within the radius,
+//!                                                           the static cells' and the landscape, meshes as OBJ
 //! ```
 
 mod cook;
@@ -43,6 +47,7 @@ mod lightmap;
 mod staticmesh;
 mod textures;
 mod volume;
+mod world;
 mod xact_write;
 mod xcmsh_write;
 
@@ -167,6 +172,12 @@ fn run(args: &[String]) -> Result<serde_json::Value> {
             let mut out = mods::deliver(Path::new(game), a(4).unwrap_or("install"), a(5).context("mod name, package folder or mod file")?, a(6).unwrap_or(""), a(7).unwrap_or(""), &files)?;
             out["report"] = serde_json::to_value(report)?;
             out
+        }
+        (Some("world-layers"), Some(game)) => serde_json::to_value(world::layers(&open(game)?))?,
+        (Some("world"), Some(game)) => {
+            let g = open(game)?;
+            let radius: f32 = a(4).context("radius (cm)")?.parse().context("radius (cm)")?;
+            world::area_obj(&g, a(3).context("world layer")?, radius, a(6) != Some("noground"), Path::new(a(5).context("out dir")?))?
         }
         (Some("installed"), Some(game)) => serde_json::to_value(mods::installed(Path::new(game))?)?,
         (Some("uninstall"), Some(game)) => { mods::uninstall(Path::new(game), a(3).context("mod name")?)?; serde_json::json!(true) }

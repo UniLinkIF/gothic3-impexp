@@ -19,6 +19,7 @@ Import and export **Gothic 3** (Piranha Bytes, 2006, Genome engine) models, char
 | Gothic 3 Character | `.xact` | armature (bones as sticks) and skinned mesh, no animation; a human body with the head of your choice (the Nameless Hero's by default). Categories: humans — body or head, animals and monsters, items and objects |
 | Gothic 3 Animations | `.xmot` | animations onto the selected Gothic 3 skeleton: one clip or a whole category — idle, movement, attacks, defence, dialogue and gestures, sitting and lying, interaction, death |
 | Gothic 3 Collision | `.xnvmsh` | only the collision, as a wireframe mesh; one `G3_Shape_<surface>` material per surface (stone, wood, earth…), and an item's convex body. A landscape cell's collision is its own triangles |
+| Gothic 3 World Layer | `.node` | what one world layer places (search by name, e.g. `ardea_dynamic_objects`) and, within a radius, the houses and rocks of the static cells and the ground — context to build a new model against where it will stand (placing it is a world editor's job). Each mesh is loaded once and linked at each placement |
 
 **File → Export** — three ways out: **a mod file** `.g3mod` (the default; one file in the game's `Mods` folder that a mod launcher puts in and takes out, and the easy way to share), install straight into the game, or a package with `INSTALL.bat` / `ROLLBACK.bat`:
 
@@ -41,7 +42,7 @@ pose.
 ## Install
 
 1. Blender 5.1 or newer.
-2. *Edit → Preferences → Get Extensions → ⌄ → Install from Disk…* → `gothic3_impexp-0.9.7.zip`.
+2. *Edit → Preferences → Get Extensions → ⌄ → Install from Disk…* → `gothic3_impexp-0.9.8.zip`.
 3. In the add-on's preferences check **Gothic 3 game folder** (the one with `Gothic3.exe`; the Steam default is
    filled in).
 

@@ -7,6 +7,7 @@ IMPORTS = (
     "gothic3.import_character",
     "gothic3.import_motion",
     "gothic3.import_collision",
+    "gothic3.import_world",
 )
 
 

@@ -9,7 +9,8 @@ import bpy, os, sys, json, tempfile, traceback
 S = sys.argv[sys.argv.index("--") + 1]
 import addon_utils
 addon_utils.enable("gothic3_impexp", default_set=True)
-from gothic3_impexp import prefs as P, export_actor, export_mesh, effects, core
+from gothic3_impexp import prefs as P, export_actor, export_mesh, effects, core, materials
+from mathutils import Vector
 pr = P.prefs()
 pr.game_dir = os.environ.get("G3_GAME", r"C:\Program Files (x86)\Steam\steamapps\common\Gothic 3")
 pr.cache_dir = os.path.join(S, "chk_cache")
@@ -136,6 +137,34 @@ try:
     c = bpy.context.active_object
     c.name = "Млин"
     check(export_mesh._default_name(bpy.context) == "Млин", f"default name {export_mesh._default_name(bpy.context)!r}")
+
+    # 8. A world layer as context: Ardea's dynamic objects with the town's houses 15 m around and the ground; the
+    #    anvil where the game has it (x 89775, z -12670 cm), meshes linked, materials shared.
+    clear()
+    r = bpy.ops.gothic3.import_world(name="G3_Myrtana_01_Ardea_Dynamic_Objects_01_shyb", radius=15.0, with_ground=True)
+    col = next((c for c in bpy.data.collections if c.get("g3_world_layer")), None)
+    obs = list(col.objects) if col else []
+    anvil = next((o for o in obs if o.name.lower().startswith("g3_object_interact_anvil_01")), None)
+    at = tuple(round(x, 1) for x in anvil.matrix_world.translation) if anvil else None
+    statics = sum(1 for o in obs if o.get("g3_source", "").lower().endswith("_cstat"))
+    ground = sum(1 for o in obs if o.get("g3_source") == "landscape")
+    dup = [m.name for m in bpy.data.materials if materials._base(m.name) != m.name and bpy.data.materials.get(materials._base(m.name))]
+    linked = len({o.data.name for o in obs}) < len(obs)
+    check(r == {"FINISHED"} and at is not None and abs(at[0] - 897.8) < 0.2 and abs(at[1] + 126.7) < 0.2 and statics > 20 and ground > 0 and linked and not dup,
+          f"world layer: {len(obs)} objects, {statics} static, {ground} ground, anvil at {at}, duplicate materials {dup[:3]}")
+    if os.environ.get("G3_RENDER"):
+        sc = bpy.context.scene
+        cam = bpy.data.objects.new("cam", bpy.data.cameras.new("cam"))
+        sc.collection.objects.link(cam)
+        cam.location = (anvil.location.x + 18, anvil.location.y - 18, anvil.location.z + 12)
+        cam.rotation_euler = (Vector(anvil.location) - cam.location).to_track_quat("-Z", "Y").to_euler()
+        sc.camera = cam
+        sun = bpy.data.objects.new("sun", bpy.data.lights.new("sun", "SUN"))
+        sun.rotation_euler = (0.8, 0.2, 0.6)
+        sc.collection.objects.link(sun)
+        sc.render.resolution_x, sc.render.resolution_y = 1280, 720
+        sc.render.filepath = os.path.join(OUT, "world_ardea.png")
+        bpy.ops.render.render(write_still=True)
 except Exception:
     traceback.print_exc()
     fails.append("exception")

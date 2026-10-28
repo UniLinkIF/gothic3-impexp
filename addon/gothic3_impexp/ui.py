@@ -60,6 +60,7 @@ class G3_PT_main(bpy.types.Panel):
         col.operator("gothic3.import_character", icon="ARMATURE_DATA")
         col.operator("gothic3.import_motion", icon="ACTION")
         col.operator("gothic3.import_collision", icon="MOD_PHYSICS")
+        col.operator("gothic3.import_world", icon="WORLD")
         col.separator()
         col.operator("gothic3.export_mesh", icon="EXPORT")
         col.operator("gothic3.export_motion", icon="ACTION")
