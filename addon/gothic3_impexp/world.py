@@ -17,8 +17,8 @@ _layers = {}
 
 
 def _search_layer(self, context, edit_text):
-    g = core.game_dir()
     try:
+        g = core.game_dir()
         if g not in _layers:
             _layers[g] = core.run("world-layers", g)
     except core.CoreError:
