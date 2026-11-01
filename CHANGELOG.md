@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.10 — 2026-11-02
+- An export reads the game as it ships without any mod's volume: ours, a package's put in by `INSTALL.bat`, a mod
+  launcher's. A volume is a mod's when its files name their place in the archive, not the developers' disks.
+- Motion and actor exports take the game's clip and actor as their template, not a version a mod put in.
+
 ## 0.9.9 — 2026-11-02
 - A new actor's name becomes a file name the way a model's does (Cyrillic transliterated, never a path), and the base
   actor's name with Blender's `.001` still replaces it.
