@@ -158,7 +158,8 @@ fn run(args: &[String]) -> Result<serde_json::Value> {
             export::run(&g, Path::new(game), a(3).context("spec.json")?, a(4).unwrap_or("install"), a(5).context("mod name, package folder or mod file")?, a(6).unwrap_or(""), a(7).unwrap_or(""))?
         }
         (Some("export-motion"), Some(game)) => {
-            let g = open(game)?;
+            // The game's clip is the template, not the version a mod put in.
+            let g = g3::G3Ctx::open_original(Path::new(game))?;
             let spec: motion_write::MotionSpec = serde_json::from_str(&std::fs::read_to_string(a(3).context("spec.json")?)?).context("motion spec")?;
             let (report, file) = motion_write::build(&g, &spec)?;
             let mut out = mods::deliver(Path::new(game), a(4).unwrap_or("install"), a(5).context("mod name, package folder or mod file")?, a(6).unwrap_or(""), a(7).unwrap_or(""), &[file])?;
@@ -166,7 +167,7 @@ fn run(args: &[String]) -> Result<serde_json::Value> {
             out
         }
         (Some("export-actor"), Some(game)) => {
-            let g = open(game)?;
+            let g = g3::G3Ctx::open_original(Path::new(game))?;
             let spec: xact_write::ActorSpec = serde_json::from_str(&std::fs::read_to_string(a(3).context("spec.json")?)?).context("actor spec")?;
             let (report, files) = xact_write::build(&g, &spec)?;
             let mut out = mods::deliver(Path::new(game), a(4).unwrap_or("install"), a(5).context("mod name, package folder or mod file")?, a(6).unwrap_or(""), a(7).unwrap_or(""), &files)?;
@@ -190,6 +191,43 @@ fn main() {
     match run(&args) {
         Ok(v) => println!("{v}"),
         Err(e) => { eprintln!("gothic3-core: {e:#}"); std::process::exit(1); }
+    }
+}
+
+#[cfg(test)]
+mod export_tests {
+    /// A clip or an actor exported again takes the game's own as its template, not the version a mod installed:
+    /// one installed with broken files leaves both exports as they would be without it.
+    #[test]
+    fn motion_and_actor_exports_start_from_the_games_files() {
+        let Some(real) = std::env::var_os("G3_GAME").map(std::path::PathBuf::from) else { return };
+        let game = std::env::temp_dir().join(format!("g3ie_test_templates_{}", std::process::id()));
+        std::fs::create_dir_all(game.join("Data")).unwrap();
+        std::fs::copy(real.join("Data").join("_compiledAnimation.pak"), game.join("Data").join("_compiledAnimation.pak")).unwrap();
+        let g = super::g3::G3Ctx::open(&game).unwrap();
+        let (clip, actor) = ("Wolf_Stand_None_None_P0_Move_Walk_N_Fwd_00_%_00_P0_150", "G3_Wolf_Body_01");
+        let (ck, ak) = (g.find("_compiledanimation", &format!("{clip}.xmot")).unwrap(), g.find("_compiledanimation", &format!("{actor}.xact")).unwrap());
+        // The wolf and its walk as the add-on would send them back.
+        let a = super::g3_actor::decode_xact(&g.read(&ak).unwrap()).unwrap();
+        let m = super::g3_motion::decode_xmot(&g.read(&ck).unwrap()).unwrap();
+        let (glb, _) = super::glb::build(actor, &a, &[(clip.to_string(), m)], false, &mut |_: &str, _: bool| Ok(None)).unwrap();
+        std::fs::write(game.join("walk.glb"), glb).unwrap();
+        std::fs::write(game.join("motion.json"), serde_json::json!({ "clip": clip, "glb": game.join("walk.glb") }).to_string()).unwrap();
+        let s = super::xact_write::tests::own_skin(&a, actor, actor, &game.join("skin"));
+        std::fs::write(game.join("actor.json"), serde_json::json!({ "base": s.base, "name": s.name, "geometry": s.geometry, "vertices": s.vertices, "corners": s.corners, "bones": s.bones,
+            "materials": s.materials.iter().map(|m| serde_json::json!({ "name": m.name })).collect::<Vec<_>>() }).to_string()).unwrap();
+        let (cp, ap) = (g.path_of(&ck).unwrap().to_string(), g.path_of(&ak).unwrap().to_string());
+        drop(g);
+        super::mods::install(&game, "Broken", &[("_compiledAnimation".into(), cp, b"not a clip".to_vec()), ("_compiledAnimation".into(), ap, b"not an actor".to_vec())]).unwrap();
+        let arg = |v: &[&str]| -> Vec<String> { v.iter().map(|x| x.to_string()).collect() };
+        let gs = game.to_string_lossy().into_owned();
+        for (cmd, spec) in [("export-motion", "motion.json"), ("export-actor", "actor.json")] {
+            let out = game.join(format!("pkg_{cmd}"));
+            let r = super::run(&arg(&["gothic3-core", cmd, &gs, &game.join(spec).to_string_lossy(), "package", &out.to_string_lossy(), "T"]));
+            assert!(r.is_ok(), "{cmd}: {:#}", r.unwrap_err());
+            assert!(out.join("_compiledAnimation.vol").is_file(), "{cmd}");
+        }
+        std::fs::remove_dir_all(&game).ok();
     }
 }
 

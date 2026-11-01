@@ -180,7 +180,7 @@ pub fn replace_mesh(template: &[u8], input: &SkinInput, materials: &[NewMaterial
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// The hero's head and body, fed their own mesh, decode to the same triangles (position and uv per corner,
@@ -223,6 +223,22 @@ mod tests {
         let g = crate::g3::G3Ctx::open(std::path::Path::new(&root)).unwrap();
         let base = "G3_Head_Hero_Hero_01";
         let a = crate::g3_actor::decode_xact(&g.read(&g.find("_compiledanimation", &format!("{base}.xact")).unwrap()).unwrap()).unwrap();
+        let dir = std::env::temp_dir().join(format!("g3ie_test_actor_name_{}", std::process::id()));
+        let spec = |name: &str| own_skin(&a, base, name, &dir);
+        let (r, files) = build(&g, &spec(r"Моя голова/..\..\x")).unwrap();
+        let path = &files.iter().find(|f| f.0 == "_compiledAnimation").unwrap().1;
+        assert!(!r.replaced && path.starts_with("gothic3_impexp/") && path.ends_with(".xact"), "{path}");
+        assert!(path[15..].chars().all(|c| c.is_ascii_alphanumeric() || "_.".contains(c)) && !path.contains(".."), "{path}");
+        assert_eq!(r.actor, path[15..path.len() - 5]);
+        let (r, files) = build(&g, &spec("g3_head_hero_hero_01.001")).unwrap();
+        assert!(r.replaced, "{}", r.actor);
+        assert_eq!(files.iter().find(|f| f.0 == "_compiledAnimation").unwrap().1.to_lowercase(), g.path_of(&g.find("_compiledanimation", &format!("{base}.xact")).unwrap()).unwrap().to_lowercase());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The spec the add-on would send for actor `a` (base `base`) with its own mesh, skin and materials, as `name`;
+    /// the skin file goes into `dir`.
+    pub(crate) fn own_skin(a: &crate::g3_actor::G3Actor, base: &str, name: &str, dir: &std::path::Path) -> ActorSpec {
         let m = &a.meshes[0];
         let nv = m.weights.len();
         let mut positions = vec![[0f32; 3]; nv];
@@ -236,21 +252,11 @@ mod tests {
         for &c in &corners { for x in m.uvs[c as usize] { b.extend(x.to_le_bytes()); } }
         for &t in &m.tri_material { b.extend(t.to_le_bytes()); }
         for w in &m.weights { for k in 0..8 { let (n, x) = w.get(k).copied().unwrap_or((0, 0.0)); b.extend((n as u32).to_le_bytes()); b.extend(x.to_le_bytes()); } }
-        let dir = std::env::temp_dir().join(format!("g3ie_test_actor_name_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(dir).unwrap();
         let geo = dir.join("skin.bin");
         std::fs::write(&geo, b).unwrap();
-        let spec = |name: &str| ActorSpec { base: base.into(), name: name.into(), geometry: geo.to_string_lossy().into_owned(), vertices: nv, corners: corners.len(), bones: a.nodes.iter().map(|n| n.name.clone()).collect(),
-            materials: a.materials.iter().map(|x| crate::export::MatSpec { name: x.name.clone(), diffuse: None, normal: None, specular: None, alpha_test: None, shape: None }).collect() };
-        let (r, files) = build(&g, &spec(r"Моя голова/..\..\x")).unwrap();
-        let path = &files.iter().find(|f| f.0 == "_compiledAnimation").unwrap().1;
-        assert!(!r.replaced && path.starts_with("gothic3_impexp/") && path.ends_with(".xact"), "{path}");
-        assert!(path[15..].chars().all(|c| c.is_ascii_alphanumeric() || "_.".contains(c)) && !path.contains(".."), "{path}");
-        assert_eq!(r.actor, path[15..path.len() - 5]);
-        let (r, files) = build(&g, &spec("g3_head_hero_hero_01.001")).unwrap();
-        assert!(r.replaced, "{}", r.actor);
-        assert_eq!(files.iter().find(|f| f.0 == "_compiledAnimation").unwrap().1.to_lowercase(), g.path_of(&g.find("_compiledanimation", &format!("{base}.xact")).unwrap()).unwrap().to_lowercase());
-        std::fs::remove_dir_all(&dir).ok();
+        ActorSpec { base: base.into(), name: name.into(), geometry: geo.to_string_lossy().into_owned(), vertices: nv, corners: corners.len(), bones: a.nodes.iter().map(|n| n.name.clone()).collect(),
+            materials: a.materials.iter().map(|x| crate::export::MatSpec { name: x.name.clone(), diffuse: None, normal: None, specular: None, alpha_test: None, shape: None }).collect() }
     }
 }
 
