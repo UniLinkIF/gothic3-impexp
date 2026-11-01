@@ -192,3 +192,24 @@ fn main() {
         Err(e) => { eprintln!("gothic3-core: {e:#}"); std::process::exit(1); }
     }
 }
+
+#[cfg(test)]
+mod release_tests {
+    /// One version everywhere a release names it: the extension manifest, `bl_info` (what Blender shows for the add-on
+    /// installed the old way), the newest CHANGELOG entry, the zip the READMEs tell to install, STATUS.
+    #[test]
+    fn the_release_has_one_version() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let read = |p: &str| std::fs::read_to_string(root.join(p)).unwrap_or_else(|e| panic!("{p}: {e}"));
+        let manifest = read("addon/gothic3_impexp/blender_manifest.toml");
+        let v = manifest.lines().find_map(|l| l.strip_prefix("version = ")).unwrap().trim_matches('"').to_string();
+        let init = read("addon/gothic3_impexp/__init__.py");
+        let bl = init.lines().find_map(|l| l.trim().strip_prefix("\"version\": (")).unwrap();
+        let bl: Vec<&str> = bl[..bl.find(')').unwrap()].split(',').map(str::trim).collect();
+        assert_eq!(bl.join("."), v, "bl_info version vs the manifest's");
+        let changelog = read("CHANGELOG.md");
+        assert!(changelog.lines().find(|l| l.starts_with("## ")).unwrap().starts_with(&format!("## {v} ")), "CHANGELOG has no {v} on top");
+        for readme in ["README.md", "README.uk.md"] { assert!(read(readme).contains(&format!("gothic3_impexp-{v}.zip")), "{readme} names another zip than {v}"); }
+        assert!(read("STATUS.md").contains(&format!("**{v}**")), "STATUS is not at {v}");
+    }
+}

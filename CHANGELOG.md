@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.9 — 2026-11-02
+- A new actor's name becomes a file name the way a model's does (Cyrillic transliterated, never a path), and the base
+  actor's name with Blender's `.001` still replaces it.
+- The world layer's name search no longer fails when the game folder is not set yet.
+- `bl_info` carries the release's version again (0.9.8 still said 0.9.7).
+
 ## 0.9.8 — 2026-10-28
 - **Import → Gothic 3 World Layer**: what the game places in one world layer (`.node`), and within a radius around it
   the town's houses and rocks (the static cells, LoD sets shown at full detail) and the ground, as context to build
