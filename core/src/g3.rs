@@ -23,9 +23,18 @@ const DIR_ATTR: u32 = 0x10;
 const DELETED_ATTR: u32 = 0x8000;
 
 #[derive(Debug, Clone)]
-pub struct G3Entry { pub path: String, pub offset: u64, pub stored: u64, pub size: u32, pub compression: u32, pub attributes: u32 }
+pub struct G3Entry { pub path: String, pub full: String, pub offset: u64, pub stored: u64, pub size: u32, pub compression: u32, pub attributes: u32 }
 
 impl G3Entry { pub fn is_deleted(&self) -> bool { self.attributes & DELETED_ATTR != 0 } }
+
+/// A volume a mod tool wrote — ours, a package's INSTALL.bat, a mod launcher's: its live files name, as their full
+/// path, their path inside the archive (`_compiledMesh\…`). The game's own volumes name the files on the developers'
+/// disks (`E:\Gothic III Work\bin\Data\…`, `#G3:/…` for removed ones), and a patch volume that only removes files
+/// has no live file at all.
+pub fn is_mod_volume(entries: &[G3Entry]) -> bool {
+    let live: Vec<&G3Entry> = entries.iter().filter(|e| !e.is_deleted()).collect();
+    !live.is_empty() && live.iter().all(|e| e.full.as_bytes().get(1) != Some(&b':') && !e.full.starts_with('#'))
+}
 
 fn u32_<R: Read>(r: &mut R) -> std::io::Result<u32> { let mut b = [0u8; 4]; r.read_exact(&mut b)?; Ok(u32::from_le_bytes(b)) }
 fn u64_<R: Read>(r: &mut R) -> std::io::Result<u64> { let mut b = [0u8; 8]; r.read_exact(&mut b)?; Ok(u64::from_le_bytes(b)) }
@@ -71,8 +80,8 @@ fn node<R: Read>(f: &mut R, out: &mut Vec<G3Entry>, depth: u32) -> Result<()> {
         let _encryption = u32_(f)?;
         let compression = u32_(f)?;
         let path = name_(f)?;
-        let _full = name_(f)?;
-        out.push(G3Entry { path, offset, stored, size, compression, attributes });
+        let full = name_(f)?;
+        out.push(G3Entry { path, full, offset, stored, size, compression, attributes });
     }
     Ok(())
 }
@@ -96,18 +105,16 @@ fn skipped(name: &str) -> bool {
 
 impl G3Ctx {
     /// `root` = the Gothic 3 install folder (the one with `Data\`).
-    pub fn open(root: &Path) -> Result<Self> { Self::open_skipping(root, &[]) }
+    pub fn open(root: &Path) -> Result<Self> { Self::open_skipping(root, &[], false) }
 
-    /// The game as it ships: without the volumes our installed mods live in, nor a mod launcher's (a re-export
-    /// reads the meshes and lightmaps it replaces, not its own last version).
+    /// The game as it ships: without the volumes our installed mods live in, nor any other mod's ([`is_mod_volume`]:
+    /// a package's, a mod launcher's), so a re-export reads what it replaces, not its own last version.
     pub fn open_original(root: &Path) -> Result<Self> {
-        let mut ours: Vec<String> = crate::mods::load(root)?.volumes.into_values().collect();
-        ours.extend(crate::mods::other_volumes(root));
-        let ours: Vec<String> = ours.iter().map(|v| v.to_lowercase()).collect();
-        Self::open_skipping(root, &ours)
+        let ours: Vec<String> = crate::mods::load(root)?.volumes.into_values().map(|v| v.to_lowercase()).collect();
+        Self::open_skipping(root, &ours, true)
     }
 
-    fn open_skipping(root: &Path, skip: &[String]) -> Result<Self> {
+    fn open_skipping(root: &Path, skip: &[String], no_mods: bool) -> Result<Self> {
         let dir = root.join("Data");
         let mut archives = vec![];
         for e in std::fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))?.flatten() {
@@ -124,6 +131,7 @@ impl G3Ctx {
         let mut overrides = 0;
         for a in archives {
             let files = read_volume(&a)?;
+            if no_mods && is_mod_volume(&files) { continue; }
             per_archive.insert(a.file_name().unwrap().to_string_lossy().to_string(), files.len());
             // Volumes of one archive share a namespace; different archives (_compiledMesh, Templates) never collide in practice.
             let group = a.file_stem().unwrap().to_string_lossy().to_lowercase();
@@ -182,5 +190,20 @@ mod tests {
             let k = g.keys().into_iter().find(|k| k.starts_with(group)).unwrap_or_else(|| panic!("no {group}"));
             assert_eq!(g.read(&k).unwrap().len() as u32, g.size_of(&k).unwrap(), "{k}");
         }
+    }
+
+    /// Every volume in the install is the game's own, except the ones our installed mods live in.
+    #[test]
+    fn the_games_volumes_are_the_games_and_ours_are_mods() {
+        let Some(root) = std::env::var_os("G3_GAME").map(PathBuf::from) else { return };
+        let ours: Vec<String> = crate::mods::load(&root).unwrap().volumes.into_values().map(|v| v.to_lowercase()).collect();
+        let mut n = 0;
+        for e in std::fs::read_dir(root.join("Data")).unwrap().flatten() {
+            let Ok(v) = read_volume(&e.path()) else { continue };
+            let name = e.file_name().to_string_lossy().to_lowercase();
+            assert_eq!(is_mod_volume(&v), ours.contains(&name), "{name}");
+            n += 1;
+        }
+        assert!(n > 30, "{n} volumes");
     }
 }

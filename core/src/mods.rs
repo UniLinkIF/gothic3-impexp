@@ -49,14 +49,6 @@ fn save(game: &Path, r: &Registry) -> Result<()> {
     Ok(())
 }
 
-/// The volumes the mod launcher that puts `.g3mod` files in keeps in the game (listed in its state file), so a
-/// re-export does not read them as the game's own files either.
-pub fn other_volumes(game: &Path) -> Vec<String> {
-    let Ok(s) = std::fs::read_to_string(game.join("RisenLab-mods").join("g3state.json")) else { return vec![] };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) else { return vec![] };
-    v["volumes"].as_object().map(|m| m.values().filter_map(|x| x.get(0).and_then(|f| f.as_str()).map(str::to_string)).collect()).unwrap_or_default()
-}
-
 /// A mod name is a folder of its own under `mods`: no path, no characters Windows forbids.
 fn check_name(name: &str) -> Result<()> {
     let bad = name.trim().is_empty() || name == "." || name == ".." || name.ends_with('.') || name.ends_with(' ')
@@ -401,6 +393,31 @@ mod tests {
         std::fs::write(reg_path(&g), "{ not json").unwrap();
         assert!(install(&g, "A", &[("_compiledMesh".to_string(), "x/A.xcmsh".to_string(), b"a".to_vec())]).is_err());
         assert!(crate::g3::G3Ctx::open_original(&g).is_err());
+        std::fs::remove_dir_all(&g).ok();
+    }
+
+    /// The game as it ships leaves out every mod's volume — ours, a package's put in by INSTALL.bat, a mod launcher's —
+    /// and keeps the game's own patch volumes, the one that only removes files too.
+    #[test]
+    fn the_original_game_leaves_every_mod_out() {
+        let Some(real) = std::env::var_os("G3_GAME").map(PathBuf::from) else { return };
+        let g = fake_game();
+        // The stand-ins of the game's volumes as empty volumes, and three real ones of the game.
+        for v in ["_compiledMesh.pak", "_compiledImage.p00", "_compiledImage.p01"] { std::fs::write(g.join("Data").join(v), crate::volume::write("x", &[], 0)).unwrap(); }
+        for v in ["Library.pak", "Library.p00", "Projects_compiled.p01"] { std::fs::copy(real.join("Data").join(v), g.join("Data").join(v)).unwrap(); }
+        install(&g, "Ours", &[("_compiledMesh".to_string(), "x/Ours.xcmsh".to_string(), b"o".to_vec())]).unwrap();
+        let pkg = g.join("pkg");
+        package(&pkg, "Pkg", &[("_compiledMesh".to_string(), "x/Pkg.xcmsh".to_string(), b"p".to_vec())]).unwrap();
+        let out = run(&pkg.join("INSTALL.bat"), Some(&g));
+        assert_eq!(numbers_of(&g, "_compiledMesh"), [0, 1], "{out}");
+        // A launcher's volume: the same layout, not in our registry.
+        std::fs::write(g.join("Data").join("Library.p01"), crate::volume::write("Library", &[("x/Launcher.efm".to_string(), b"l".to_vec())], crate::volume::filetime_now())).unwrap();
+        let all = crate::g3::G3Ctx::open(&g).unwrap().keys();
+        for k in ["_compiledmesh/x/ours.xcmsh", "_compiledmesh/x/pkg.xcmsh", "library/x/launcher.efm"] { assert!(all.contains(&k.to_string()), "{k} in {all:?}"); }
+        let orig = crate::g3::G3Ctx::open_original(&g).unwrap();
+        let keys = orig.keys();
+        assert!(keys.iter().all(|k| !k.starts_with("_compiledmesh/") && !k.contains("launcher")), "{keys:?}");
+        assert!(keys.iter().any(|k| k.starts_with("library/")) && orig.per_archive.contains_key("Projects_compiled.p01"), "{:?}", orig.per_archive);
         std::fs::remove_dir_all(&g).ok();
     }
 

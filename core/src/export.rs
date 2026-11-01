@@ -2,7 +2,7 @@
 //! triangles keep their order), materials as PNGs, optional collision — to Gothic 3 files, then a mod.
 //!
 //! * The mesh replaces the game's mesh of the same name (same archive path, and its `_lod1`… beside it), or is new
-//!   (`_compiledMesh/gothic3_impexp/<name>.xcmsh`). The game is read without our own mod volumes, so a second
+//!   (`_compiledMesh/gothic3_impexp/<name>.xcmsh`). The game is read without any mod's volumes, so a second
 //!   export replaces the shipped mesh again, not our last version.
 //! * A replaced mesh takes its vertex colours from the nearest vertex of the mesh it replaces (same material
 //!   first): the landscape's layer blend and the baked brightness. Every lightmap made for that mesh (one per
@@ -245,7 +245,7 @@ fn lightmaps(g: &G3Ctx, orig: &crate::g3_res::G3Mesh, tpath: &str, near: &[Vec<u
     Ok(())
 }
 
-/// The files of the model: (archive, path, bytes). `g` is the game without our own mod volumes.
+/// The files of the model: (archive, path, bytes). `g` is the game without any mod's volumes.
 pub fn build(g: &G3Ctx, spec: &Spec) -> Result<(Report, Vec<(String, String, Vec<u8>)>)> {
     let name = clean(&spec.name);
     if name.is_empty() { bail!("model name is empty"); }
