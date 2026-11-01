@@ -214,6 +214,44 @@ mod tests {
             assert_eq!(crate::staticmesh::needs_turn(&b.meshes[0].positions, &b.meshes[0].normals, b.meshes[0].triangles.iter().copied()), true, "{name}: Gothic 3 order");
         }
     }
+
+    /// A new actor's name becomes a file name the way a model's does: typed with Cyrillic, spaces or slashes it never
+    /// turns into a path out of the mod's folder. The base actor's own name (any case, Blender's `.001`) replaces it.
+    #[test]
+    fn a_new_actor_is_named_like_a_model() {
+        let Ok(root) = std::env::var("G3_GAME") else { return };
+        let g = crate::g3::G3Ctx::open(std::path::Path::new(&root)).unwrap();
+        let base = "G3_Head_Hero_Hero_01";
+        let a = crate::g3_actor::decode_xact(&g.read(&g.find("_compiledanimation", &format!("{base}.xact")).unwrap()).unwrap()).unwrap();
+        let m = &a.meshes[0];
+        let nv = m.weights.len();
+        let mut positions = vec![[0f32; 3]; nv];
+        for (c, &v) in m.vertex.iter().enumerate() { positions[v as usize] = m.positions[c]; }
+        // The add-on's skin file: positions · corner vertex · normals · uvs · material per triangle · 8 weights per vertex.
+        let mut b = vec![];
+        for p in &positions { for x in p { b.extend(x.to_le_bytes()); } }
+        let corners: Vec<u32> = m.triangles.iter().flat_map(|t| [t[0], t[2], t[1]]).collect();
+        for &c in &corners { b.extend(m.vertex[c as usize].to_le_bytes()); }
+        for &c in &corners { for x in m.normals[c as usize] { b.extend(x.to_le_bytes()); } }
+        for &c in &corners { for x in m.uvs[c as usize] { b.extend(x.to_le_bytes()); } }
+        for &t in &m.tri_material { b.extend(t.to_le_bytes()); }
+        for w in &m.weights { for k in 0..8 { let (n, x) = w.get(k).copied().unwrap_or((0, 0.0)); b.extend((n as u32).to_le_bytes()); b.extend(x.to_le_bytes()); } }
+        let dir = std::env::temp_dir().join(format!("g3ie_test_actor_name_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let geo = dir.join("skin.bin");
+        std::fs::write(&geo, b).unwrap();
+        let spec = |name: &str| ActorSpec { base: base.into(), name: name.into(), geometry: geo.to_string_lossy().into_owned(), vertices: nv, corners: corners.len(), bones: a.nodes.iter().map(|n| n.name.clone()).collect(),
+            materials: a.materials.iter().map(|x| crate::export::MatSpec { name: x.name.clone(), diffuse: None, normal: None, specular: None, alpha_test: None, shape: None }).collect() };
+        let (r, files) = build(&g, &spec(r"Моя голова/..\..\x")).unwrap();
+        let path = &files.iter().find(|f| f.0 == "_compiledAnimation").unwrap().1;
+        assert!(!r.replaced && path.starts_with("gothic3_impexp/") && path.ends_with(".xact"), "{path}");
+        assert!(path[15..].chars().all(|c| c.is_ascii_alphanumeric() || "_.".contains(c)) && !path.contains(".."), "{path}");
+        assert_eq!(r.actor, path[15..path.len() - 5]);
+        let (r, files) = build(&g, &spec("g3_head_hero_hero_01.001")).unwrap();
+        assert!(r.replaced, "{}", r.actor);
+        assert_eq!(files.iter().find(|f| f.0 == "_compiledAnimation").unwrap().1.to_lowercase(), g.path_of(&g.find("_compiledanimation", &format!("{base}.xact")).unwrap()).unwrap().to_lowercase());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -287,9 +325,12 @@ pub fn build(g: &crate::g3::G3Ctx, spec: &ActorSpec) -> Result<(ActorReport, Vec
     }
     let (bytes, more) = replace_mesh(&template, &input, &mats)?;
     notes.extend(more);
+    // A name the game's files can carry, as a model's: never a path, Cyrillic transliterated.
+    let name = crate::export::clean(&spec.name);
+    if name.is_empty() { bail!("actor name is empty"); }
     let base_path = g.path_of(&base_key).unwrap_or(&base_key).to_string();
-    let replaced = spec.name.eq_ignore_ascii_case(&crate::stem_of(&base_path));
-    let path = if replaced { base_path } else { format!("gothic3_impexp/{}.xact", spec.name) };
+    let replaced = name.eq_ignore_ascii_case(&crate::stem_of(&base_path));
+    let path = if replaced { base_path } else { format!("gothic3_impexp/{name}.xact") };
     files.push(("_compiledAnimation".to_string(), path, bytes));
-    Ok((ActorReport { actor: spec.name.clone(), replaced, vertices: input.positions.len(), triangles: input.corner_vertex.len() / 3, materials: mats.iter().map(|m| m.name.clone()).collect(), notes }, files))
+    Ok((ActorReport { actor: name, replaced, vertices: input.positions.len(), triangles: input.corner_vertex.len() / 3, materials: mats.iter().map(|m| m.name.clone()).collect(), notes }, files))
 }
