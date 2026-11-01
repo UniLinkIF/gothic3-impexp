@@ -49,8 +49,8 @@ fn save(game: &Path, r: &Registry) -> Result<()> {
     Ok(())
 }
 
-/// The volumes other tools of ours keep in the game (RisenLab Starter's), so a re-export does not read them as the
-/// game's own files either.
+/// The volumes the mod launcher that puts `.g3mod` files in keeps in the game (listed in its state file), so a
+/// re-export does not read them as the game's own files either.
 pub fn other_volumes(game: &Path) -> Vec<String> {
     let Ok(s) = std::fs::read_to_string(game.join("RisenLab-mods").join("g3state.json")) else { return vec![] };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) else { return vec![] };
