@@ -40,6 +40,19 @@ try:
     check([export_mesh.collision_kind(n) for n in ["Stone_Column", "Wall_Colored", "X_COL", "X_COL.001", "X_cv", "Barrel_CV.012", "Body_Collar"]]
           == [None, None, "col", "col", "cv", "cv", None], "collision_kind")
 
+    # 1b. Name searches with no game folder set give nothing instead of an error in the dialog.
+    from gothic3_impexp import world, import_mesh, import_actor
+    game = pr.game_dir
+    pr.game_dir = os.path.join(S, "no game here")
+    got = {}
+    for label, fn, op in [("world", world._search_layer, None), ("mesh", import_mesh._search, type("O", (), {"category": "all"})()), ("actor", import_actor._search_actor, None)]:
+        try:
+            got[label] = fn(op, bpy.context, "ardea")
+        except Exception as e:
+            got[label] = repr(e)
+    pr.game_dir = game
+    check(all(v == [] for v in got.values()), f"searches without a game folder: {got}")
+
     # 2. Images: JPG on disk, painted unsaved, packed.
     def mk(name, fmt, ext):
         im = bpy.data.images.new(name, 8, 8)
@@ -88,7 +101,7 @@ try:
 
     def spy(cmd, *args):
         out = orig(cmd, *args)
-        if cmd == "export":
+        if cmd in ("export", "export-actor"):
             seen["spec"] = json.load(open(args[1], encoding="utf-8"))
             seen["out"] = out
         return out
@@ -130,6 +143,17 @@ try:
     g1 = export_actor.gather_skinned(bpy.context, meshes, 0.01, tempfile.mkdtemp(dir=OUT))
     dx = float(abs(g0[0][:, 0].mean() - g1[0][:, 0].mean()))
     check(dx < 0.01 and g0[8] == 0, f"actor skin moves {dx:.3f} cm with the armature; unweighted {g0[8]}")
+    # 6b. A new actor typed with Cyrillic and a slash comes out as a file name in the package.
+    bpy.ops.object.select_all(action="DESELECT")
+    for o in meshes:
+        o.select_set(True)
+    bpy.context.view_layer.objects.active = meshes[0]
+    seen.clear()
+    core.run = spy
+    r = bpy.ops.gothic3.export_actor(name="Вовк/новий", mode="package", folder=os.path.join(OUT, "wolf_pkg"), title="Wolf (test)")
+    core.run = orig
+    rep = seen.get("out", {}).get("report", {})
+    check(r == {"FINISHED"} and rep.get("actor") == "Vovk_novyi" and not rep.get("replaced") and os.path.isfile(os.path.join(OUT, "wolf_pkg", "_compiledAnimation.vol")), f"new actor: {rep.get('actor')!r}")
 
     # 7. Cyrillic name reaches the core as it is.
     clear()
