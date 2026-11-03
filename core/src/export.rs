@@ -309,13 +309,17 @@ fn as_element(orig: &crate::g3_res::G3Mesh, e: usize, p: &crate::xcmsh_write::Pa
         let found = (0..27).find_map(|nb| grid.get(&[c[0] + nb % 3 - 1, c[1] + nb / 3 % 3 - 1, c[2] + nb / 9 - 1])?.iter().copied().find(|&k| twins(j, k as usize)));
         canon.push(found.unwrap_or_else(|| { grid.entry(c).or_default().push(j as u32); j as u32 }));
     }
+    // A vertex of the original goes to the one of the part most like it, and so to the one that stands for that: not
+    // to the nearest stand-in, which may stand for another (the rounding groups do not chain).
+    let mut every: HashMap<[i32; 3], Vec<u32>> = HashMap::new();
+    for (j, q) in p.positions.iter().enumerate() { every.entry(cell(*q)).or_default().push(j as u32); }
     let mut map = Vec::with_capacity(n);
     for i in first..first + n {
         let q = orig.geo.positions[i];
         let c = cell(q);
         let mut best: Option<(f32, u32)> = None;
         for dx in -1..=1 { for dy in -1..=1 { for dz in -1..=1 {
-            for &j in grid.get(&[c[0] + dx, c[1] + dy, c[2] + dz]).into_iter().flatten() {
+            for &j in every.get(&[c[0] + dx, c[1] + dy, c[2] + dz]).into_iter().flatten() {
                 let d: f32 = (0..3).map(|k| (p.positions[j as usize][k] - q[k]).powi(2)).sum();
                 let uv_ok = !has_uv || (0..2).all(|k| (p.uvs[j as usize][k] - orig.geo.uvs[i][k]).abs() <= 1e-3);
                 if d > 0.05 * 0.05 || !uv_ok { continue; }
@@ -327,7 +331,7 @@ fn as_element(orig: &crate::g3_res::G3Mesh, e: usize, p: &crate::xcmsh_write::Pa
                 if best.map_or(true, |b| score < b.0) { best = Some((score, j)); }
             }
         } } }
-        map.push(best?.1);
+        map.push(canon[best?.1 as usize]);
     }
     let mut used: Vec<bool> = canon.iter().enumerate().map(|(j, &c)| c != j as u32).collect();
     for &j in &map { used[j as usize] = true; }
@@ -945,7 +949,7 @@ mod tests {
     }
 
     /// Across the game: meshes lit by lightmap pages somewhere in the world, each written back from its own triangles,
-    /// keep the pages of nearly every element (199 of 204 in this sample of 24; the others are lit per vertex).
+    /// keep the pages of every element (204 of 204 in this sample of 24).
     #[test]
     fn paged_meshes_replaced_by_themselves_keep_their_pages() {
         let Ok(root) = std::env::var("G3_GAME") else { return };
@@ -971,7 +975,7 @@ mod tests {
         }
         std::fs::remove_dir_all(std::env::temp_dir().join(format!("g3ie_test_paged_{}", std::process::id()))).ok();
         eprintln!("{n} meshes: {kept} of {paged} paged elements keep their pages");
-        assert!(n >= 20 && kept * 100 >= paged * 95, "{n} meshes: {kept} of {paged} paged elements keep their pages");
+        assert!(n >= 20 && kept == paged, "{n} meshes: {kept} of {paged} paged elements keep their pages");
     }
 
     /// The world's distance layer places `<name>_LOWPOLY` by file name: a replaced building replaces it too — with the

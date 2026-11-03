@@ -34,6 +34,8 @@
   cube, cylinder or capsule, UV sphere — moved, turned and scaled as you like) go into the placement sidecar as the
   game's shapes 3, 4 and 5, with their sizes and the shape's data as the game writes it; they are not part of the model.
 - The glow look's blend mode 7 is the engine's own `Brighten` (read from Engine.dll, where 6 is `Darken`).
+- Every part that is one of the game's elements again keeps its pages (204 of 204 in a sample of 24 buildings, was
+  199): vertices of a part that differ only by rounding sometimes matched another group than the one standing for them.
 - Import keeps the game's double-sided faces (a second face on the same three corners), which Blender's OBJ importer
   dropped.
 
