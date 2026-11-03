@@ -11,7 +11,7 @@
 //!     string table: u32 0xDEADBEEF · u8 1 · u32 0 (no strings)
 //! ```
 //! Material: a shipped `GENOMFLE` material is the template; its texture names (`*.tga` in the string table) become
-//! ours, and an alpha-tested one gets our cut-off in `MaskReference`.
+//! ours, `BlendMode` the look's, and an alpha-tested one gets our cut-off in `MaskReference`.
 
 use anyhow::{bail, Context, Result};
 use texpresso::{Format, Params};
@@ -77,23 +77,88 @@ pub fn ximg(rgba: &[u8], w: u32, h: u32, kind: Dxt, filetime: u64) -> Result<Vec
 /// A Blender normal map (RGB, y up) as Gothic 3 keeps them (RGB, y down).
 pub fn normal_to_game(rgba: &[u8]) -> Vec<u8> { rgba.chunks_exact(4).flat_map(|p| [p[0], 255 - p[1], p[2], 255]).collect() }
 
-/// A material template: the shipped material and the role of each of its texture strings, in table order.
-pub struct Template { pub material: &'static str, pub roles: &'static [&'static str], pub masked: bool }
+/// A material template: the shipped material, the role of each of its texture strings in table order, and the
+/// `BlendMode` the written material has (the template's own, but for the glow, which is the blend's with 7).
+///
+/// Measured on the install's 1143 materials: a material shows how it is drawn by `BlendMode` (0 opaque, 1 alpha
+/// test with `MaskReference`, 2 alpha blend, 7 additive) and what it is drawn on by `TransformationType` (0 static,
+/// 2 skinned: 192 of the 193 materials actors use, every one static meshes use is 0 or unset). Each template is a
+/// material of the most common make (the same samplers and combiners) among the shipped ones of its look.
+pub struct Template { pub material: &'static str, pub roles: &'static [&'static str], pub masked: bool, pub blend: u32 }
 
-/// Opaque, diffuse + normal (wood).
-pub const OPAQUE: Template = Template { material: "G3_Objects_Wood_01_B", roles: &["diffuse", "normal"], masked: false };
-/// Opaque with a specular map (the metal barrel).
-pub const OPAQUE_SPECULAR: Template = Template { material: "G3_Objects_Barrelmetal_01_A", roles: &["diffuse", "normal", "specular"], masked: false };
+/// Opaque, diffuse + normal (61 of the 97 such static materials are made like this wood; the rest add parallax,
+/// scaling or reflections).
+pub static OPAQUE: Template = Template { material: "G3_Architecture_Wood_08_A", roles: &["diffuse", "normal"], masked: false, blend: 0 };
+/// Opaque with a specular map (68 of 76 are made like this dungeon floor).
+pub static OPAQUE_SPECULAR: Template = Template { material: "G3_Varant_Dungeon_Ground_01", roles: &["diffuse", "normal", "specular"], masked: false, blend: 0 };
 /// Alpha test (a straw roof; BlendMode 1, the cut-off in MaskReference).
-pub const MASKED: Template = Template { material: "G3_Architecture_Strawroof_02_A", roles: &["diffuse", "normal"], masked: true };
+pub static MASKED: Template = Template { material: "G3_Architecture_Strawroof_02_A", roles: &["diffuse", "normal"], masked: true, blend: 1 };
+/// Alpha test with a specular map (a drapery).
+pub static MASKED_SPECULAR: Template = Template { material: "G3_Architecture_Drapery_02_A", roles: &["diffuse", "normal", "specular"], masked: true, blend: 1 };
+/// Alpha blend, see-through by the diffuse's alpha (BlendMode 2; the shipped ones are diffuse only).
+pub static BLEND: Template = Template { material: "G3_Nature_Tree_Root_01_E", roles: &["diffuse"], masked: false, blend: 2 };
+/// Alpha blend with normal and specular maps (the one shipped: a well's glass).
+pub static BLEND_SPECULAR: Template = Template { material: "G3_Desert_Well_Alpha_01", roles: &["diffuse", "normal", "specular"], masked: false, blend: 2 };
+/// Additive glow (BlendMode 7: its colour adds light, black is clear). The game's four glowing materials all move their
+/// texture (rotate, scroll, oscillate), so the glow is the plain blend template with BlendMode 7.
+pub static GLOW: Template = Template { material: "G3_Nature_Tree_Root_01_E", roles: &["diffuse"], masked: false, blend: 7 };
+/// Skinned (TransformationType 2), for actors: opaque — a ranger's body.
+pub static ACTOR_OPAQUE: Template = Template { material: "G3_Animation_Body_Ranger_01_A", roles: &["diffuse", "normal"], masked: false, blend: 0 };
+/// Skinned, opaque with a specular map — the stalker.
+pub static ACTOR_SPECULAR: Template = Template { material: "G3_Animation_Monster_Stalker_01", roles: &["diffuse", "normal", "specular"], masked: false, blend: 0 };
+/// Skinned alpha test — the hair 110 actors wear (diffuse only, as every skinned alpha test the game has).
+pub static ACTOR_MASKED: Template = Template { material: "HAIR", roles: &["diffuse"], masked: true, blend: 1 };
+/// Skinned alpha blend — the scavenger's feathers.
+pub static ACTOR_BLEND: Template = Template { material: "Scavenger_Feathers", roles: &["diffuse"], masked: false, blend: 2 };
+/// Skinned additive glow: the feathers with BlendMode 7.
+pub static ACTOR_GLOW: Template = Template { material: "Scavenger_Feathers", roles: &["diffuse"], masked: false, blend: 7 };
+
+/// How a material is drawn, from the Blender material.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Look { Opaque, AlphaTest, Blend, Glow }
+
+/// The template for a new material of `look` with these maps, for an actor (skinned) or a static mesh, and the maps it
+/// has no place for.
+pub fn template_for(actor: bool, look: Look, normal: bool, specular: bool) -> (&'static Template, Vec<&'static str>) {
+    let t = match (actor, look) {
+        (false, Look::Opaque) => if specular { &OPAQUE_SPECULAR } else { &OPAQUE },
+        (false, Look::AlphaTest) => if specular { &MASKED_SPECULAR } else { &MASKED },
+        (false, Look::Blend) => if normal && specular { &BLEND_SPECULAR } else { &BLEND },
+        (false, Look::Glow) => &GLOW,
+        (true, Look::Opaque) => if specular { &ACTOR_SPECULAR } else { &ACTOR_OPAQUE },
+        (true, Look::AlphaTest) => &ACTOR_MASKED,
+        (true, Look::Blend) => &ACTOR_BLEND,
+        (true, Look::Glow) => &ACTOR_GLOW,
+    };
+    let dropped = [("normal", normal), ("specular", specular)].into_iter().filter(|(r, has)| *has && !t.roles.contains(r)).map(|(r, _)| r).collect();
+    (t, dropped)
+}
+
+/// What the report calls a look.
+pub fn look_name(t: &Template) -> &'static str {
+    match (t.blend, t.roles.contains(&"specular")) { (7, _) => "glow", (2, _) => "blend", (1, true) => "alpha test, specular", (1, false) => "alpha test", (_, true) => "specular", _ => "opaque" }
+}
 
 fn table(d: &[u8]) -> Result<(usize, Vec<String>)> {
     let at = u32::from_le_bytes(d.get(10..14).context("table offset")?.try_into().unwrap()) as usize;
     Ok((at, crate::g3_res::genomfle_strings(d)?))
 }
 
-/// `template` with its textures replaced by `textures` (role -> image name without extension) and, when masked,
-/// `MaskReference` = `cutoff`. A role the template has but `textures` lacks keeps the template's own image.
+/// Where the value of property `name` of type `ty` starts in a GENOMFLE resource (`[u16 name][u16 type][u16 30]
+/// [u32 size]` then the value), and its size.
+fn property_at(d: &[u8], strings: &[String], name: &str, ty: &str) -> Option<(usize, usize)> {
+    let (ni, ti) = (strings.iter().position(|s| s == name)? as u16, strings.iter().position(|s| s == ty)? as u16);
+    let pat = [ni.to_le_bytes(), ti.to_le_bytes(), 30u16.to_le_bytes()].concat();
+    let p = d.windows(pat.len()).position(|w| w == pat.as_slice())? + pat.len();
+    Some((p + 4, u32::from_le_bytes(d.get(p..p + 4)?.try_into().unwrap()) as usize))
+}
+
+/// Neutral pictures for a map a template samples and the Blender material lacks: a flat normal, no shine.
+pub fn neutral(role: &str) -> Option<[u8; 4]> { match role { "normal" => Some([128, 128, 255, 255]), "specular" => Some([0, 0, 0, 255]), _ => None } }
+
+/// `template` with its textures replaced by `textures` (role -> image name without extension), `BlendMode` = the
+/// template's look and, when masked, `MaskReference` = `cutoff`. A role the template has but `textures` lacks keeps the
+/// template's own image. Only these values and the names change: the bytes before the table keep their length.
 pub fn material(template_bytes: &[u8], t: &Template, textures: &[(&str, String)], cutoff: Option<u8>) -> Result<Vec<u8>> {
     if !template_bytes.starts_with(b"GENOMFLE") { bail!("template {} is not a GENOMFLE material", t.material); }
     let (at, mut strings) = table(template_bytes)?;
@@ -104,13 +169,15 @@ pub fn material(template_bytes: &[u8], t: &Template, textures: &[(&str, String)]
     }
     let mut out = template_bytes[..at].to_vec();
     if let (true, Some(cut)) = (t.masked, cutoff) {
-        let (mi, ci) = (strings.iter().position(|s| s == "MaskReference").context("no MaskReference")?, strings.iter().position(|s| s == "char").context("no char type")?);
-        let pat = [(mi as u16).to_le_bytes(), (ci as u16).to_le_bytes(), 30u16.to_le_bytes()].concat();
-        let p = out.windows(pat.len()).position(|w| w == pat.as_slice()).context("MaskReference value not found")? + pat.len();
         // u32 size (1) then the char.
-        if u32::from_le_bytes(out[p..p + 4].try_into().unwrap()) != 1 { bail!("MaskReference size"); }
-        out[p + 4] = cut;
+        let (p, n) = property_at(&out, &strings, "MaskReference", "char").context("MaskReference value not found")?;
+        if n != 1 { bail!("MaskReference size"); }
+        out[p] = cut;
     }
+    // An enum: u16 version, u32 value.
+    let (p, n) = property_at(&out, &strings, "BlendMode", "bTPropertyContainer<enum eEShaderMaterialBlendMode>").context("BlendMode value not found")?;
+    if n != 6 { bail!("BlendMode size"); }
+    out[p + 2..p + 6].copy_from_slice(&t.blend.to_le_bytes());
     out.extend(0xDEADBEEFu32.to_le_bytes());
     out.push(1);
     out.extend((strings.len() as u32).to_le_bytes());
@@ -166,11 +233,17 @@ mod tests {
     }
 
 
+    pub const ALL: [&Template; 12] = [&OPAQUE, &OPAQUE_SPECULAR, &MASKED, &MASKED_SPECULAR, &BLEND, &BLEND_SPECULAR, &GLOW, &ACTOR_OPAQUE, &ACTOR_SPECULAR, &ACTOR_MASKED, &ACTOR_BLEND, &ACTOR_GLOW];
+    const ACTORS: [&Template; 5] = [&ACTOR_OPAQUE, &ACTOR_SPECULAR, &ACTOR_MASKED, &ACTOR_BLEND, &ACTOR_GLOW];
+
+    /// Every template written with our textures reads back strictly: the bytes before the string table are the
+    /// template's but for the cut-off and the blend mode, the table is the template's but for the texture names, and the
+    /// material says the look it was written for (blend mode, mask, static or skinned).
     #[test]
     fn templates_take_our_textures() {
         let Ok(root) = std::env::var("G3_GAME") else { return };
         let g = crate::g3::G3Ctx::open(std::path::Path::new(&root)).unwrap();
-        for t in [&OPAQUE, &OPAQUE_SPECULAR, &MASKED] {
+        for t in ALL {
             let k = g.find("_compiledmaterial", &format!("{}.xshmat", t.material)).unwrap();
             let d = g.read(&k).unwrap();
             let tex: Vec<(&str, String)> = t.roles.iter().map(|r| (*r, format!("My_Crate_{r}"))).collect();
@@ -178,10 +251,86 @@ mod tests {
             let parsed = crate::g3_res::parse_xshmat(&m).unwrap();
             let want: Vec<String> = t.roles.iter().map(|r| format!("My_Crate_{r}.tga")).collect();
             assert_eq!(parsed.textures, want, "{}", t.material);
-            assert_eq!(parsed.blend, Some(if t.masked { 1 } else { 0 }));
-            // Same bytes before the table: only names and the cut-off change.
-            assert_eq!(&m[..14], &d[..14]);
+            assert_eq!(parsed.blend, Some(t.blend), "{}", t.material);
+            let trans = |b: &[u8]| crate::g3_res::enum_property(b, "TransformationType").unwrap();
+            assert_eq!(trans(&m), trans(&d));
+            assert_eq!(trans(&m), Some(if ACTORS.iter().any(|a| std::ptr::eq(*a, t)) { 2 } else { 0 }), "{}", t.material);
+            let (at, mt) = (u32::from_le_bytes(d[10..14].try_into().unwrap()) as usize, u32::from_le_bytes(m[10..14].try_into().unwrap()) as usize);
+            assert_eq!(at, mt, "{}: the table moved", t.material);
+            let strings = crate::g3_res::genomfle_strings(&d).unwrap();
+            let (bp, _) = property_at(&d, &strings, "BlendMode", "bTPropertyContainer<enum eEShaderMaterialBlendMode>").unwrap();
+            let mask = if t.masked { Some(property_at(&d, &strings, "MaskReference", "char").unwrap().0) } else { None };
+            let diff: Vec<usize> = (0..at).filter(|&i| d[i] != m[i]).collect();
+            assert!(diff.iter().all(|&i| (bp + 2..bp + 6).contains(&i) || Some(i) == mask), "{}: bytes {diff:?} changed", t.material);
+            if t.masked { assert_eq!(m[mask.unwrap()], 77); }
+            let (ours, game) = (crate::g3_res::genomfle_strings(&m).unwrap(), strings);
+            assert_eq!(ours.len(), game.len());
+            for (a, b) in ours.iter().zip(&game) { if a != b { assert!(want.contains(a), "{}: {b} became {a}", t.material); } }
         }
+    }
+
+    /// Each template is the look it stands for among the game's own materials: the blend mode and maps it has, static
+    /// (TransformationType 0) or skinned (2) as the materials of static meshes and of actors are, and made the most
+    /// common way among the shipped materials of that look (the same samplers, combiners, texture-coordinate sources).
+    #[test]
+    fn templates_are_made_like_the_games_materials_of_their_look() {
+        let Ok(root) = std::env::var("G3_GAME") else { return };
+        let g = crate::g3::G3Ctx::open(std::path::Path::new(&root)).unwrap();
+        // What static meshes and actors use.
+        let mut on_static = std::collections::HashSet::new();
+        for k in g.keys().into_iter().filter(|k| k.ends_with(".xcmsh")) {
+            let Ok(m) = crate::g3_res::decode_xcmsh(&g.read(&k).unwrap()) else { continue };
+            on_static.extend(m.geo.submeshes.iter().map(|s| s.material.trim_end_matches(".xshmat").to_lowercase()));
+        }
+        let mut on_actor = std::collections::HashSet::new();
+        for k in g.keys().into_iter().filter(|k| k.ends_with(".xact")) {
+            let Ok(a) = crate::g3_actor::decode_xact(&g.read(&k).unwrap()) else { continue };
+            on_actor.extend(a.materials.iter().map(|m| m.name.split('|').next().unwrap().trim_end_matches(".xshmat").to_lowercase()));
+        }
+        // (blend, transformation, roles) → make → count, over the shipped GENOMFLE materials.
+        let mut makes: std::collections::HashMap<(Option<u32>, Option<u32>, Vec<String>), std::collections::HashMap<Vec<String>, usize>> = Default::default();
+        let (mut actor_skinned, mut actor_other, mut static_skinned) = (0, 0, 0);
+        let make_of = |d: &[u8]| -> (Option<u32>, Option<u32>, Vec<String>, Vec<String>) {
+            let strings = crate::g3_res::genomfle_strings(d).unwrap();
+            let roles = crate::g3_res::parse_xshmat(d).unwrap().textures.iter().map(|t| crate::textures::role(t).unwrap_or("?").to_string()).collect();
+            let mut make: Vec<String> = strings.into_iter().filter(|s| s.starts_with("eC") && !s.starts_with("eCResource") && !s.starts_with("eCShader")).collect();
+            make.sort(); make.dedup();
+            (crate::g3_res::enum_property(d, "BlendMode").unwrap(), crate::g3_res::enum_property(d, "TransformationType").unwrap(), roles, make)
+        };
+        for k in g.keys().into_iter().filter(|k| k.ends_with(".xshmat")) {
+            let d = g.read(&k).unwrap();
+            let stem = k.rsplit('/').next().unwrap().trim_end_matches(".xshmat").to_string();
+            let trans = crate::g3_res::enum_property(&d, "TransformationType").unwrap();
+            if on_actor.contains(&stem) { if trans == Some(2) { actor_skinned += 1 } else { actor_other += 1 } }
+            else if on_static.contains(&stem) && trans == Some(2) { static_skinned += 1; }
+            if !d.starts_with(b"GENOMFLE") { continue; }
+            let (b, t, roles, make) = make_of(&d);
+            *makes.entry((b, t, roles)).or_default().entry(make).or_default() += 1;
+        }
+        assert!(actor_skinned > 180 && actor_other <= 1 && static_skinned == 0, "actors: {actor_skinned} skinned, {actor_other} not; static meshes: {static_skinned} skinned");
+        for t in ALL {
+            let d = g.read(&g.find("_compiledmaterial", &format!("{}.xshmat", t.material)).unwrap()).unwrap();
+            let (b, tr, roles, make) = make_of(&d);
+            assert_eq!(roles, t.roles, "{}", t.material);
+            assert_eq!(b, Some(if t.blend == 7 { 2 } else { t.blend }), "{}", t.material);
+            assert_eq!(t.masked, t.blend == 1);
+            let group = &makes[&(b, tr, roles)];
+            let most = group.values().max().unwrap();
+            assert_eq!(group[&make], *most, "{}: {make:?} is not the most common make of its look {group:?}", t.material);
+        }
+    }
+
+    /// The look picks the template; maps it has no place for are named.
+    #[test]
+    fn looks_pick_their_templates() {
+        assert!(std::ptr::eq(template_for(false, Look::Opaque, true, true).0, &OPAQUE_SPECULAR));
+        assert!(std::ptr::eq(template_for(false, Look::AlphaTest, true, false).0, &MASKED));
+        let (t, dropped) = template_for(false, Look::Blend, true, false);
+        assert!(std::ptr::eq(t, &BLEND) && dropped == ["normal"]);
+        assert!(std::ptr::eq(template_for(false, Look::Blend, true, true).0, &BLEND_SPECULAR));
+        assert_eq!(template_for(true, Look::AlphaTest, true, true).1, vec!["normal", "specular"]);
+        assert_eq!(look_name(template_for(false, Look::Glow, false, false).0), "glow");
+        assert_eq!(look_name(template_for(true, Look::Opaque, true, true).0), "specular");
     }
 }
 

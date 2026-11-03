@@ -24,8 +24,56 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 
-#[derive(Deserialize)]
-pub struct MatSpec { pub name: String, #[serde(default)] pub diffuse: Option<String>, #[serde(default)] pub normal: Option<String>, #[serde(default)] pub specular: Option<String>, #[serde(default)] pub alpha_test: Option<u8>, #[serde(default)] pub shape: Option<String> }
+#[derive(Deserialize, Default)]
+pub struct MatSpec {
+    pub name: String,
+    #[serde(default)] pub diffuse: Option<String>,
+    #[serde(default)] pub normal: Option<String>,
+    #[serde(default)] pub specular: Option<String>,
+    #[serde(default)] pub alpha_test: Option<u8>,
+    #[serde(default)] pub shape: Option<String>,
+    /// See-through other than a cut-off: "blend" (by the diffuse's alpha: glass, water, haze) or "glow" (additive).
+    #[serde(default)] pub blend: Option<String>,
+}
+
+impl MatSpec {
+    pub fn look(&self) -> g3_write::Look {
+        match self.blend.as_deref() { Some("glow") => g3_write::Look::Glow, Some("blend") => g3_write::Look::Blend, _ if self.alpha_test.is_some() => g3_write::Look::AlphaTest, _ => g3_write::Look::Opaque }
+    }
+}
+
+/// The maps of a new material: image name per role of its template.
+pub struct Made { pub template: &'static g3_write::Template, pub diffuse: Option<String>, pub normal: Option<String>, pub specular: Option<String> }
+
+/// A new material `mname` made from the template of `m`'s look (static or, for an actor, skinned): its pictures as
+/// `<mname>_Diffuse_01` / `_Normal_01` / `_Specular_01`, the `.xshmat`, and warnings for what does not fit. A normal or
+/// specular map the template samples and the Blender material lacks becomes a flat / dull picture, so none of the
+/// template's own shows through; a missing diffuse keeps the template's.
+pub(crate) fn make_material(g: &G3Ctx, m: &MatSpec, mname: &str, actor: bool, now: u64, files: &mut Vec<(String, String, Vec<u8>)>, warnings: &mut Vec<String>) -> Result<Made> {
+    let (t, dropped) = g3_write::template_for(actor, m.look(), m.normal.is_some(), m.specular.is_some());
+    for r in dropped { warnings.push(format!("material {}: the game's {} materials{} have no {r} map; it is left out", m.name, g3_write::look_name(t), if actor { " for actors" } else { "" })); }
+    let alpha = matches!(m.look(), g3_write::Look::AlphaTest | g3_write::Look::Blend);
+    let mut made = Made { template: t, diffuse: None, normal: None, specular: None };
+    for (role, png, suffix) in [("diffuse", &m.diffuse, "_Diffuse_01"), ("normal", &m.normal, "_Normal_01"), ("specular", &m.specular, "_Specular_01")] {
+        if !t.roles.contains(&role) { continue; }
+        let (px, w, h) = match png {
+            Some(p) => {
+                let img = image::open(p).with_context(|| format!("material {}: {p}", m.name))?.to_rgba8();
+                let (w, h) = img.dimensions();
+                (if role == "normal" { g3_write::normal_to_game(img.as_raw()) } else { img.into_raw() }, w, h)
+            }
+            None => match g3_write::neutral(role) { Some(c) => (c.repeat(16), 4, 4), None => continue },
+        };
+        let tname = format!("{mname}{suffix}");
+        files.push(("_compiledImage".to_string(), format!("gothic3_impexp/{tname}.ximg"), g3_write::ximg(&px, w, h, if alpha && role == "diffuse" { Dxt::Dxt5 } else { Dxt::Dxt1 }, now)?));
+        *match role { "diffuse" => &mut made.diffuse, "normal" => &mut made.normal, _ => &mut made.specular } = Some(tname);
+    }
+    if m.diffuse.is_none() { warnings.push(format!("material {}: no Base Color image — the template's texture stays", m.name)); }
+    let tk = g.find("_compiledmaterial", &format!("{}.xshmat", t.material)).with_context(|| format!("template {} not in the game", t.material))?;
+    let tex: Vec<(&str, String)> = [("diffuse", &made.diffuse), ("normal", &made.normal), ("specular", &made.specular)].into_iter().filter_map(|(r, x)| x.clone().map(|x| (r, x))).collect();
+    files.push(("_compiledMaterial".to_string(), format!("gothic3_impexp/{mname}.xshmat"), g3_write::material(&g.read(&tk)?, t, &tex, m.alpha_test)?));
+    Ok(made)
+}
 
 #[derive(Deserialize)]
 pub struct CollisionSpec {
@@ -263,30 +311,12 @@ pub fn build(g: &G3Ctx, spec: &Spec) -> Result<(Report, Vec<(String, String, Vec
             mat_names.push(base);
             continue;
         }
-        let t = if m.alpha_test.is_some() { &g3_write::MASKED } else if m.specular.is_some() { &g3_write::OPAQUE_SPECULAR } else { &g3_write::OPAQUE };
         // Name: the material's own plus a short hash of its pictures, so two mods' "Material" never collide.
         let mut h = hash(base.as_bytes());
         for p in [&m.diffuse, &m.normal, &m.specular].into_iter().flatten() { h ^= hash(&std::fs::read(p).unwrap_or_default()).rotate_left(7); }
         let mname = format!("G3IE_{base}_{:06x}", h & 0xffffff);
-        let mut tex = vec![];
-        let mut image = |png: &Option<String>, role: &'static str, suffix: &str, normal: bool, alpha: bool| -> Result<()> {
-            let Some(p) = png else { return Ok(()) };
-            let img = image::open(p).with_context(|| format!("material {}: {p}", m.name))?.to_rgba8();
-            let (w, h) = img.dimensions();
-            let px = if normal { g3_write::normal_to_game(img.as_raw()) } else { img.into_raw() };
-            let tname = format!("{mname}{suffix}");
-            files.push(("_compiledImage".to_string(), format!("gothic3_impexp/{tname}.ximg"), g3_write::ximg(&px, w, h, if alpha { Dxt::Dxt5 } else { Dxt::Dxt1 }, now)?));
-            tex.push((role, tname));
-            Ok(())
-        };
-        image(&m.diffuse, "diffuse", "_Diffuse_01", false, m.alpha_test.is_some())?;
-        image(&m.normal, "normal", "_Normal_01", true, false)?;
-        if t.roles.contains(&"specular") { image(&m.specular, "specular", "_Specular_01", false, false)?; }
-        if m.diffuse.is_none() { r.warnings.push(format!("material {}: no Base Color image — the template's texture stays", m.name)); }
-        let tk = g.find("_compiledmaterial", &format!("{}.xshmat", t.material)).with_context(|| format!("template {} not in the game", t.material))?;
-        let tex_ref: Vec<(&str, String)> = tex.iter().map(|(a, b)| (*a, b.clone())).collect();
-        files.push(("_compiledMaterial".to_string(), format!("gothic3_impexp/{mname}.xshmat"), g3_write::material(&g.read(&tk)?, t, &tex_ref, m.alpha_test)?));
-        r.materials.push(format!("{}: new {mname}{}", m.name, if m.alpha_test.is_some() { " (alpha test)" } else if t.roles.contains(&"specular") { " (specular)" } else { "" }));
+        let made = make_material(g, m, &mname, false, now, &mut files, &mut r.warnings)?;
+        r.materials.push(format!("{}: new {mname} ({})", m.name, g3_write::look_name(made.template)));
         mat_names.push(mname);
     }
     if mat_names.is_empty() { mat_names.push("G3_Objects_Wood_01_B".into()); }
@@ -532,7 +562,7 @@ mod tests {
         std::fs::create_dir_all(dir).unwrap();
         let geof = dir.join("geometry.bin");
         std::fs::write(&geof, bytes).unwrap();
-        let mats = || geo.submeshes.iter().map(|s| MatSpec { name: s.material.trim_end_matches(".xshmat").to_string(), diffuse: None, normal: None, specular: None, alpha_test: None, shape: None }).collect();
+        let mats = || geo.submeshes.iter().map(|s| MatSpec { name: s.material.trim_end_matches(".xshmat").to_string(), ..Default::default() }).collect();
         Spec { name: crate::stem_of(key), geometry: geof.to_string_lossy().into_owned(), corners: t.len() * 3, materials: mats(),
             collision: Some(CollisionSpec { geometry: None, corners: None, material: Some("stone".into()), mode: Some(collision.into()), materials: vec![], convex: vec![] }) }
     }
@@ -614,6 +644,55 @@ mod tests {
         // The cooking drops the model's few degenerate triangles.
         assert!(tris <= r.triangles && tris * 1000 >= r.triangles * 999, "{tris} of {}: {:?}", r.triangles, r.collision);
         assert!(r.warnings.iter().any(|w| w.contains("debris")), "{:?}", r.warnings);
+    }
+
+    /// A new model's materials take the template of their look, with our pictures and a flat normal where the Blender
+    /// material has none; an actor's take the skinned ones.
+    #[test]
+    fn new_materials_take_the_template_of_their_look() {
+        let Ok(root) = std::env::var("G3_GAME") else { return };
+        let g = G3Ctx::open_original(Path::new(&root)).unwrap();
+        let dir = std::env::temp_dir().join(format!("g3ie_test_looks_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = |n: &str, a: u8| { let p = dir.join(format!("{n}.png")); image::RgbaImage::from_pixel(8, 8, image::Rgba([200, 90, 40, a])).save(&p).unwrap(); Some(p.to_string_lossy().into_owned()) };
+        let m = |name: &str, normal: bool, specular: bool, alpha: Option<u8>, blend: Option<&str>| MatSpec { name: name.into(), diffuse: png(name, if alpha.is_some() || blend.is_some() { 100 } else { 255 }), normal: if normal { png(&format!("{name}_n"), 255) } else { None }, specular: if specular { png(&format!("{name}_s"), 255) } else { None }, alpha_test: alpha, blend: blend.map(String::from), ..Default::default() };
+        let mats = vec![m("Plank", true, false, None, None), m("Iron", true, true, None, None), m("Leaves", false, false, Some(90), None), m("Glass", true, false, None, Some("blend")), m("Fire", false, false, None, Some("glow"))];
+        // One triangle per material.
+        let mut b = vec![];
+        let n = mats.len();
+        for t in 0..n { for k in 0..3 { for x in [t as f32 * 100.0 + k as f32 * 30.0, (k % 2) as f32 * 50.0, (k / 2) as f32 * 40.0] { b.extend(x.to_le_bytes()); } } }
+        for _ in 0..n * 3 { for x in [0f32, 1.0, 0.0] { b.extend(x.to_le_bytes()); } }
+        for t in 0..n * 3 { for x in [(t % 3) as f32 * 0.5, (t % 2) as f32] { b.extend(x.to_le_bytes()); } }
+        for t in 0..n as u32 { b.extend(t.to_le_bytes()); }
+        let geo = dir.join("geometry.bin");
+        std::fs::write(&geo, b).unwrap();
+        let spec = Spec { name: "G3IE_Test_Lamp_Stand".into(), geometry: geo.to_string_lossy().into_owned(), corners: n * 3, materials: mats, collision: None };
+        let (r, files) = build(&g, &spec).unwrap();
+        let read = |stem: &str| { let f = files.iter().find(|f| f.1.ends_with(".xshmat") && f.1.contains(stem)).unwrap_or_else(|| panic!("{stem}: {:?}", r.files)); crate::g3_res::parse_xshmat(&f.2).unwrap() };
+        assert_eq!(read("Plank").blend, Some(0));
+        assert_eq!(read("Iron").textures.len(), 3);
+        assert_eq!(read("Leaves").blend, Some(1));
+        assert_eq!(read("Glass").blend, Some(2));
+        assert_eq!(read("Fire").blend, Some(7));
+        assert!(r.materials.iter().any(|x| x.starts_with("Iron") && x.ends_with("(specular)")), "{:?}", r.materials);
+        assert!(r.warnings.iter().any(|w| w.contains("Glass") && w.contains("normal")), "{:?}", r.warnings);
+        // A leaf without a normal map gets a flat one, not the straw roof's.
+        let leaves = read("Leaves");
+        assert!(leaves.textures.iter().all(|t| t.starts_with("G3IE_Leaves_")), "{:?}", leaves.textures);
+        let flat = files.iter().find(|f| f.1.contains("G3IE_Leaves_") && f.1.ends_with("_Normal_01.ximg")).expect("flat normal");
+        let (_, _, px) = crate::textures::decode(&flat.2).unwrap();
+        assert!(px.chunks_exact(4).all(|p| (p[0] as i32 - 128).abs() < 3 && (p[1] as i32 - 128).abs() < 3 && p[2] > 250), "{:?}", &px[..8]);
+        // The same materials on an actor: skinned templates.
+        let mut warn = vec![];
+        let mut out = vec![];
+        for mat in &spec.materials {
+            let made = make_material(&g, mat, &format!("G3IE_Actor_{}", mat.name), true, 0, &mut out, &mut warn).unwrap();
+            let x = &out.iter().rev().find(|f| f.1.ends_with(".xshmat")).unwrap().2;
+            assert_eq!(crate::g3_res::enum_property(x, "TransformationType").unwrap(), Some(2), "{}", mat.name);
+            assert_eq!(crate::g3_res::parse_xshmat(x).unwrap().blend, Some(made.template.blend));
+        }
+        assert!(warn.iter().any(|w| w.contains("Glass") && w.contains("for actors")), "{warn:?}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Names become file names without two of them ever becoming one: Cyrillic in Latin, anything else hashed.

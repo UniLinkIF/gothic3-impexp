@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+- New materials take the game's material of their look, read from the Blender nodes: opaque, with a specular map,
+  alpha test (with or without specular), see-through blend (Alpha straight from the image, or a game material with
+  blend mode 2: glass, water, haze) and glow (an emission image: additive). Each template is the most common make among
+  the game's own materials of that look; a normal or specular map the template samples and the Blender material lacks is
+  written flat / dull instead of showing the template's own.
+- An actor's new materials are skinned ones (`TransformationType` 2, as 192 of the 193 materials the game's actors
+  use); before, they were static materials.
+
 ## 0.9.10 — 2026-11-02
 - An export reads the game as it ships without any mod's volume: ours, a package's put in by `INSTALL.bat`, a mod
   launcher's. A volume is a mod's when its files name their place in the archive, not the developers' disks.

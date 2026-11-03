@@ -246,7 +246,8 @@ mod release_tests {
         let bl: Vec<&str> = bl[..bl.find(')').unwrap()].split(',').map(str::trim).collect();
         assert_eq!(bl.join("."), v, "bl_info version vs the manifest's");
         let changelog = read("CHANGELOG.md");
-        assert!(changelog.lines().find(|l| l.starts_with("## ")).unwrap().starts_with(&format!("## {v} ")), "CHANGELOG has no {v} on top");
+        // Changes waiting for the next release sit above it under `## Unreleased`.
+        assert!(changelog.lines().find(|l| l.starts_with("## ") && l.trim() != "## Unreleased").unwrap().starts_with(&format!("## {v} ")), "CHANGELOG has no {v} on top");
         for readme in ["README.md", "README.uk.md"] { assert!(read(readme).contains(&format!("gothic3_impexp-{v}.zip")), "{readme} names another zip than {v}"); }
         assert!(read("STATUS.md").contains(&format!("**{v}**")), "STATUS is not at {v}");
     }

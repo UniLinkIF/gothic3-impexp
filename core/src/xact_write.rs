@@ -256,7 +256,7 @@ pub(crate) mod tests {
         let geo = dir.join("skin.bin");
         std::fs::write(&geo, b).unwrap();
         ActorSpec { base: base.into(), name: name.into(), geometry: geo.to_string_lossy().into_owned(), vertices: nv, corners: corners.len(), bones: a.nodes.iter().map(|n| n.name.clone()).collect(),
-            materials: a.materials.iter().map(|x| crate::export::MatSpec { name: x.name.clone(), diffuse: None, normal: None, specular: None, alpha_test: None, shape: None }).collect() }
+            materials: a.materials.iter().map(|x| crate::export::MatSpec { name: x.name.clone(), ..Default::default() }).collect() }
     }
 }
 
@@ -309,25 +309,11 @@ pub fn build(g: &crate::g3::G3Ctx, spec: &ActorSpec) -> Result<(ActorReport, Vec
         }
         let h = [&m.diffuse, &m.normal, &m.specular].into_iter().flatten().fold(name.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3)), |h, p| std::fs::read(p).unwrap_or_default().iter().fold(h, |h, b| (h ^ *b as u64).wrapping_mul(0x100000001b3)));
         let mname = format!("G3IE_{name}_{:06x}", h & 0xffffff);
-        let mut img = |png: &Option<String>, suffix: &str, normal: bool, alpha: bool| -> Result<Option<String>> {
-            let Some(p) = png else { return Ok(None) };
-            let im = image::open(p).with_context(|| format!("material {name}: {p}"))?.to_rgba8();
-            let (w, hh) = im.dimensions();
-            let px = if normal { crate::g3_write::normal_to_game(im.as_raw()) } else { im.into_raw() };
-            let t = format!("{mname}{suffix}");
-            files.push(("_compiledImage".to_string(), format!("gothic3_impexp/{t}.ximg"), crate::g3_write::ximg(&px, w, hh, if alpha { crate::g3_write::Dxt::Dxt5 } else { crate::g3_write::Dxt::Dxt1 }, now)?));
-            Ok(Some(t))
-        };
-        let diffuse = img(&m.diffuse, "_Diffuse_01", false, m.alpha_test.is_some())?;
-        let normal = img(&m.normal, "_Normal_01", true, false)?;
-        let specular = img(&m.specular, "_Specular_01", false, false)?;
-        // A shader material of the same name too, in case the engine takes the actor's material from there.
-        let t = if m.alpha_test.is_some() { &crate::g3_write::MASKED } else if specular.is_some() { &crate::g3_write::OPAQUE_SPECULAR } else { &crate::g3_write::OPAQUE };
-        let tk = g.find("_compiledmaterial", &format!("{}.xshmat", t.material)).context("material template")?;
-        let tex: Vec<(&str, String)> = [("diffuse", &diffuse), ("normal", &normal), ("specular", &specular)].into_iter().filter_map(|(r, x)| x.clone().map(|x| (r, x))).collect();
-        files.push(("_compiledMaterial".to_string(), format!("gothic3_impexp/{mname}.xshmat"), crate::g3_write::material(&g.read(&tk)?, t, &tex, m.alpha_test)?));
-        notes.push(format!("{name}: new {mname}"));
-        mats.push(NewMaterial { name: mname, diffuse, normal, specular });
+        // The shader material of the same name, from a skinned template: the game keeps one (TransformationType 2) for
+        // all but 1 of the 193 materials its actors name.
+        let made = crate::export::make_material(g, m, &mname, true, now, &mut files, &mut notes)?;
+        notes.push(format!("{name}: new {mname} ({})", crate::g3_write::look_name(made.template)));
+        mats.push(NewMaterial { name: mname, diffuse: made.diffuse, normal: made.normal, specular: made.specular });
     }
     let (bytes, more) = replace_mesh(&template, &input, &mats)?;
     notes.extend(more);

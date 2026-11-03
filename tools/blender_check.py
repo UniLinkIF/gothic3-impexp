@@ -189,6 +189,49 @@ try:
         sc.render.resolution_x, sc.render.resolution_y = 1280, 720
         sc.render.filepath = os.path.join(OUT, "world_ardea.png")
         bpy.ops.render.render(write_still=True)
+    # 9. New materials by the look of their nodes: opaque, alpha test (Math node), blend (Alpha straight from the
+    #    image), glow (an emission image); exported as a package, each takes the game's template of its look.
+    clear()
+    looks = {}
+    img = bpy.data.images.new("look_px", 8, 8, alpha=True)
+    img.pixels = [0.8, 0.4, 0.1, 0.5] * 64
+    img.filepath_raw = os.path.join(OUT, "look_px.png")
+    img.file_format = "PNG"
+    img.save()
+    for i, kind in enumerate(["opaque", "alpha", "blend", "glow"]):
+        bpy.ops.mesh.primitive_plane_add(location=(i * 3, 0, 0))
+        ob = bpy.context.active_object
+        ob.name = f"LookTest_{kind}"
+        m = bpy.data.materials.new(f"LookTest_{kind}")
+        m.use_nodes = True
+        nt = m.node_tree
+        bsdf = next(n for n in nt.nodes if n.type == "BSDF_PRINCIPLED")
+        t = nt.nodes.new("ShaderNodeTexImage")
+        t.image = img
+        nt.links.new(t.outputs["Color"], bsdf.inputs["Emission Color" if kind == "glow" else "Base Color"])
+        if kind == "glow":
+            bsdf.inputs["Emission Strength"].default_value = 2.0
+        if kind == "alpha":
+            cmp = nt.nodes.new("ShaderNodeMath")
+            cmp.operation = "GREATER_THAN"
+            cmp.inputs[1].default_value = 0.4
+            nt.links.new(t.outputs["Alpha"], cmp.inputs[0])
+            nt.links.new(cmp.outputs[0], bsdf.inputs["Alpha"])
+        if kind == "blend":
+            nt.links.new(t.outputs["Alpha"], bsdf.inputs["Alpha"])
+        ob.data.materials.append(m)
+        s = export_mesh._material_spec(m, tempfile.mkdtemp(dir=OUT))
+        looks[kind] = (s.get("blend"), s.get("alpha_test"), bool(s.get("diffuse")))
+    check(looks == {"opaque": (None, None, True), "alpha": (None, 102, True), "blend": ("blend", None, True), "glow": ("glow", None, True)}, f"material looks: {looks}")
+    bpy.ops.object.select_all(action="SELECT")
+    seen.clear()
+    core.run = spy
+    r = bpy.ops.gothic3.export_mesh(name="LookTest_Stand", mode="package", folder=os.path.join(OUT, "looks_pkg"), title="Looks (test)", collision="none")
+    core.run = orig
+    mats = seen.get("out", {}).get("report", {}).get("materials", [])
+    want = ["(opaque)", "(alpha test)", "(blend)", "(glow)"]
+    check(r == {"FINISHED"} and len(mats) == 4 and all(any(m.endswith(w) for m in mats) for w in want), f"looks exported: {mats}")
+
 except Exception:
     traceback.print_exc()
     fails.append("exception")

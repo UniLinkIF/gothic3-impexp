@@ -92,8 +92,27 @@ def _material_spec(mat, tmp):
             spec["normal"] = _image_png(_linked_image(bsdf.inputs.get("Normal")), tmp)
             s = bsdf.inputs.get("Specular IOR Level") or bsdf.inputs.get("Specular")
             spec["specular"] = _image_png(_linked_image(s), tmp)
-            spec["alpha_test"] = _alpha_cutoff(mat, bsdf)
+            spec["blend"] = _blend_kind(mat, bsdf)
+            if spec["blend"] == "glow" and spec["diffuse"] is None:
+                spec["diffuse"] = _image_png(_linked_image(bsdf.inputs.get("Emission Color")), tmp)
+            spec["alpha_test"] = None if spec["blend"] else _alpha_cutoff(mat, bsdf)
     return spec
+
+
+def _blend_kind(mat, bsdf):
+    """'glow' (the game's additive blend mode 7: an emission image, or a game material that was additive), 'blend'
+    (see-through by the texture's alpha: Alpha linked straight to it, not through the alpha-test Math node, or a game
+    material with blend mode 2), or None (opaque or alpha test)."""
+    kind = mat.get("g3_blend")
+    if kind == 7:
+        return "glow"
+    e, strength = bsdf.inputs.get("Emission Color"), bsdf.inputs.get("Emission Strength")
+    if e is not None and e.is_linked and _linked_image(e) is not None and (strength is None or strength.is_linked or strength.default_value > 0):
+        return "glow"
+    a = bsdf.inputs.get("Alpha")
+    if a is not None and a.is_linked and kind != 1 and not (a.links[0].from_node.type == "MATH" and a.links[0].from_node.operation == "GREATER_THAN"):
+        return "blend"
+    return None
 
 
 def _alpha_cutoff(mat, bsdf):
