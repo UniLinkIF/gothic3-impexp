@@ -7,6 +7,9 @@
   sets, and the cell of every face (`g3_cell`). The cells come as the game ships them, without any mod.
 - **Export → Gothic 3 Terrain → Mod**: only the cells that changed are written (mesh, collision from their own
   triangles, lightmap); a cell that comes back as it went out is left to the game. Painted colours go along as they are.
+- Motion export **as a new variant** of the clip's action: the next free variant number (the wolf's ambient loops
+  01–05 → 06), named the way the game composes clip names. The report says what the game makes of a new name: a
+  variant, words the game never composes, or a name it does not look up.
 - Model export: a replaced mesh with further uv sets (Varant's landscape cells) keeps them; before, they were lost.
 
 ## 0.9.10 — 2026-11-02

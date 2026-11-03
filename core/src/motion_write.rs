@@ -157,6 +157,23 @@ mod tests {
         // The GENOMFLE head and table stay, sizes follow.
         assert_eq!(&w[..10], &d[..10]);
     }
+
+    /// Variants as the game numbers them: the wolf's ambient loops 01–05 (00 after %) get a 06; its ambient 00–04 all
+    /// say 04 after %, so a 05 comes with a warning. A clip not named the game's way has no variants.
+    #[test]
+    fn clips_get_the_next_free_variant() {
+        let Ok(root) = std::env::var("G3_GAME") else { return };
+        let g = crate::g3::G3Ctx::open_original(std::path::Path::new(&root)).unwrap();
+        let v = variants(&g, "Wolf_Stand_None_None_P0_Ambient_Loop_N_Fwd_02_%_00_P0_0").unwrap();
+        assert_eq!(v.existing.len(), 5, "{:?}", v.existing);
+        assert_eq!(v.next, "Wolf_Stand_None_None_P0_Ambient_Loop_N_Fwd_06_%_00_P0_0");
+        assert!(!v.note.contains("never"), "{}", v.note);
+        let w = variants(&g, "Wolf_Stand_None_None_P0_Ambient_Ambient_N_Fwd_00_%_04_P0_0").unwrap();
+        assert_eq!((w.existing.len(), w.next.as_str()), (5, "Wolf_Stand_None_None_P0_Ambient_Ambient_N_Fwd_05_%_04_P0_0"));
+        assert!(w.note.contains("never pick a 05"), "{}", w.note);
+        assert!(variants(&g, "G3_Door_01_Open").is_err());
+        assert_eq!(variant_of("Hero_Stand_None_None_P0_Ambient_Loop_N_Fwd_01_%_00_P0_0"), Some(("Hero_Stand_None_None_P0_Ambient_Loop_N_Fwd".into(), 1, "%_00_P0_0".into())));
+    }
 }
 
 /// The first animation of a glb exported by Blender, as game-space keys per bone (lowercase name), times from 0.
@@ -195,11 +212,46 @@ pub fn keys_from_glb(glb: &[u8]) -> Result<(String, HashMap<String, Keys>, f32)>
 
 /// What the add-on asks for: the game clip that is the template (and is replaced unless `as_name` is given), the glb, and
 /// optionally new frame effects (time s, name).
+/// `variant`: the clip goes in as the next free variant of the template's action (`as_name` is then not used).
 #[derive(serde::Deserialize)]
-pub struct MotionSpec { pub clip: String, pub glb: String, #[serde(default)] pub as_name: Option<String>, #[serde(default)] pub effects: Option<Vec<(f32, String)>> }
+pub struct MotionSpec { pub clip: String, pub glb: String, #[serde(default)] pub as_name: Option<String>, #[serde(default)] pub effects: Option<Vec<(f32, String)>>, #[serde(default)] pub variant: bool }
 
 #[derive(serde::Serialize)]
-pub struct Report { pub clip: String, pub template: String, pub new: bool, pub bones: usize, pub keys: usize, pub duration: f32, pub effects: usize, pub path: String }
+pub struct Report { pub clip: String, pub template: String, pub new: bool, pub bones: usize, pub keys: usize, pub duration: f32, pub effects: usize, pub path: String, pub note: Option<String> }
+
+/// A clip name as the game composes it: `<actor>_<stance>_<left>_<right>_<phase>_<action>_<part>_<N|I|O>_<direction>_<VV>`
+/// (Script.dll: `%s_%s_%s_%s_%s_%s_%s_%s_%s_%s_`, the variant `VV` as `%02d`, `00` when there is none), then `%` and what
+/// the clip says about itself (`_<n>_<phase>_<ms>`). Returns (the part before the variant, the variant, the part from `%`).
+pub fn variant_of(name: &str) -> Option<(String, u32, String)> {
+    let (head, tail) = name.split_once("_%_")?;
+    let (pre, v) = head.rsplit_once('_')?;
+    if v.len() != 2 || pre.split('_').count() != 9 { return None; }
+    Some((pre.to_string(), v.parse().ok()?, format!("%_{tail}")))
+}
+
+#[derive(serde::Serialize)]
+pub struct Variants { pub existing: Vec<String>, pub next: String, pub note: String }
+
+/// The game's variants of `clip`'s action (same words, same part from `%`) and the name of the next free one. Groups
+/// numbered from 01 keep `00` after `%` (the wolf's ambient loops 01–05); groups numbered from 00 write their highest
+/// variant there (the wolf's ambient 00–04 all end `%_04_P0_0`), which a new variant cannot change in the game's files.
+pub fn variants(g: &crate::g3::G3Ctx, clip: &str) -> Result<Variants> {
+    let key = g.find("_compiledanimation", &format!("{}.xmot", clip.trim_end_matches(".xmot"))).with_context(|| format!("{clip}: no such clip in Gothic 3"))?;
+    let name = crate::stem_of(g.path_of(&key).unwrap_or(&key));
+    let (pre, _, tail) = variant_of(&name).with_context(|| format!("{name}: not named the way the game composes clip names (…_<variant>_%_…)"))?;
+    let mut existing: Vec<(u32, String)> = g.keys().into_iter().filter(|k| k.starts_with("_compiledanimation/") && k.ends_with(".xmot"))
+        .filter_map(|k| { let n = crate::stem_of(g.path_of(&k).unwrap_or(&k)); let (p, v, t) = variant_of(&n)?; (p.eq_ignore_ascii_case(&pre) && t.eq_ignore_ascii_case(&tail)).then_some((v, n)) }).collect();
+    existing.sort();
+    let top = existing.last().map(|x| x.0).unwrap_or(0);
+    let from_zero = existing.first().is_some_and(|x| x.0 == 0);
+    let counted: Option<u32> = tail.split('_').nth(1).and_then(|x| x.parse().ok());
+    let note = if from_zero && counted == Some(top) && top > 0 {
+        format!("the game's variants 00–{top:02} of this action all say {top:02} after %: the game may count on that and never pick a {:02}", top + 1)
+    } else {
+        format!("a new variant beside the game's {} (picking among variants is the game's; not checked in the game)", existing.len())
+    };
+    Ok(Variants { existing: existing.into_iter().map(|x| x.1).collect(), next: format!("{pre}_{:02}_{tail}", top + 1), note })
+}
 
 /// The clip for the mod: the template clip with the glb's keys, under its own name or `as_name` (a new clip beside the
 /// game's, named the way the game names them so the animation system can pick it).
@@ -212,9 +264,23 @@ pub fn build(g: &crate::g3::G3Ctx, spec: &MotionSpec) -> Result<(Report, (String
     let effects = match &spec.effects { Some(f) => f.len(), None => crate::g3_motion::frame_effects(&template).map(|f| f.len()).unwrap_or(0) };
     if bones == 0 { bail!("none of the clip's bones is in the exported animation — is it the right armature?"); }
     let template_path = g.path_of(&key).unwrap_or(&key).to_string();
-    let new = spec.as_name.as_deref().filter(|n| !n.is_empty() && !n.eq_ignore_ascii_case(&crate::stem_of(&template_path)));
+    let variant = if spec.variant { Some(variants(g, clip)?) } else { None };
+    let as_name = match &variant { Some(v) => Some(v.next.clone()), None => spec.as_name.clone() };
+    let new = as_name.as_deref().filter(|n| !n.is_empty() && !n.eq_ignore_ascii_case(&crate::stem_of(&template_path)));
     if let Some(n) = new { if !n.chars().all(|c| c.is_ascii_alphanumeric() || "_%-".contains(c)) { bail!("clip name {n:?}: letters, digits, _ % - only"); } }
     let path = match new { Some(n) => format!("{n}.xmot"), None => template_path.clone() };
     let n = keys.values().map(|k| k.pos.len() + k.rot.len()).sum();
-    Ok((Report { clip: crate::stem_of(&path), template: crate::stem_of(&template_path), new: new.is_some(), bones, keys: n, duration, effects, path: format!("_compiledAnimation/{path}") }, ("_compiledAnimation".to_string(), path, bytes)))
+    // What the game makes of a new name: it plays clips by the name it composes from the actor's state.
+    let note = match (new, variant) {
+        (None, _) => None,
+        (Some(_), Some(v)) => Some(v.note),
+        (Some(n), None) => Some(match variant_of(n) {
+            None => "the game looks clips up by the name it composes (<actor>_<stance>_…_<variant>_%_…); one named otherwise plays only where something names it".to_string(),
+            Some((pre, v, _)) => {
+                let known = g.keys().into_iter().any(|k| k.starts_with("_compiledanimation/") && crate::stem_of(&k).to_lowercase().starts_with(&format!("{}_", pre.to_lowercase())));
+                if known { format!("variant {v:02} of an action the game has") } else { "no clip of the game has these words: the game composes names from fixed word lists, so it plays this one only if they come up".to_string() }
+            }
+        }),
+    };
+    Ok((Report { clip: crate::stem_of(&path), template: crate::stem_of(&template_path), new: new.is_some(), bones, keys: n, duration, effects, path: format!("_compiledAnimation/{path}"), note }, ("_compiledAnimation".to_string(), path, bytes)))
 }

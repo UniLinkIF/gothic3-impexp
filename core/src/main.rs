@@ -27,6 +27,7 @@
 //! gothic3-core world <game> <layer> <radius cm> <out dir> [noground]
 //!                                                           a layer as context: its placements and, within the radius,
 //!                                                           the static cells' and the landscape, meshes as OBJ
+//! gothic3-core clip-variants <game> <clip>                the game's variants of the clip's action, the next free name
 //! gothic3-core terrain-cells <game>                         the landscape cells: name, land, box over the ground
 //! gothic3-core terrain <game> <cells | @x,z,r> <out dir>    landscape cells to edit, with all they carry (.g3terrain)
 //! gothic3-core export-terrain <game> <spec.json> install <mod> | package <folder> <title>
@@ -186,6 +187,7 @@ fn run(args: &[String]) -> Result<serde_json::Value> {
             let radius: f32 = a(4).context("radius (cm)")?.parse().context("radius (cm)")?;
             world::area_obj(&g, a(3).context("world layer")?, radius, a(6) != Some("noground"), Path::new(a(5).context("out dir")?))?
         }
+        (Some("clip-variants"), Some(game)) => serde_json::to_value(motion_write::variants(&g3::G3Ctx::open_original(Path::new(game))?, a(3).context("clip")?)?)?,
         (Some("terrain-cells"), Some(game)) => serde_json::to_value(terrain::cells(&open(game)?)?)?,
         (Some("terrain"), Some(game)) => {
             // The cells as the game ships them: what the export compares with and writes over.

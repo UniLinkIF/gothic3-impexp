@@ -13,7 +13,7 @@ import shutil
 import tempfile
 
 import bpy
-from bpy.props import EnumProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, StringProperty
 
 from . import catalog, core, effects
 from .import_actor import actor_clips
@@ -38,6 +38,7 @@ class G3_OT_export_motion(bpy.types.Operator):
 
     category: EnumProperty(name="Категорія", items=catalog.enum_items(catalog.CLIP_CATEGORIES))
     clip: StringProperty(name="Анімація гри", description="Яку анімацію замінити (або взяти за зразок для нової)", search=_search_clip, options={"SKIP_SAVE"})
+    new_variant: BoolProperty(name="Новим варіантом", description="Нова анімація під наступним вільним номером варіанта тієї ж дії (напр. вовк: Ambient_Loop 01–05 → 06): гра бере анімацію за назвою, яку складає зі стану персонажа, а варіанти — за номером", default=False, options={"SKIP_SAVE"})
     as_name: StringProperty(name="Нова назва", description="Порожньо — замінити анімацію гри; назва — нова анімація поруч (напр. Wolf_Stand_None_Fist_P0_Move_Run_N_Fwd_00_%_00_P0_401)", options={"SKIP_SAVE"})
     mode: EnumProperty(name="Куди", items=core.MODES, default="mod")
     folder: StringProperty(name="Тека", subtype="DIR_PATH", description="Куди покласти файл мода чи пакет (типово: файл — у теку Mods гри)")
@@ -57,7 +58,9 @@ class G3_OT_export_motion(bpy.types.Operator):
         col = self.layout.column()
         col.prop(self, "category")
         col.prop(self, "clip")
-        col.prop(self, "as_name")
+        col.prop(self, "new_variant")
+        if not self.new_variant:
+            col.prop(self, "as_name")
         col.prop(self, "mode", expand=True)
         if self.mode != "install":
             col.prop(self, "folder")
@@ -88,8 +91,8 @@ class G3_OT_export_motion(bpy.types.Operator):
                 o.select_set(True)
         spec = os.path.join(tmp, "spec.json")
         with open(spec, "w", encoding="utf-8") as f:
-            json.dump({"clip": self.clip, "glb": glb, "as_name": self.as_name or None, "effects": effects.as_times(context.scene, action)}, f)
-        target = self.as_name or self.clip
+            json.dump({"clip": self.clip, "glb": glb, "as_name": None if self.new_variant else (self.as_name or None), "variant": self.new_variant, "effects": effects.as_times(context.scene, action)}, f)
+        target = self.clip if self.new_variant else (self.as_name or self.clip)
         try:
             out, where = core.deliver("export-motion", spec, self.mode, target, self.title, self.folder)
             if self.mode == "install":
@@ -102,6 +105,8 @@ class G3_OT_export_motion(bpy.types.Operator):
             shutil.rmtree(tmp, ignore_errors=True)
         r = out["report"]
         what = f"нова, за зразком {r['template']}" if r["new"] else "замінено"
+        if r.get("note"):
+            self.report({"WARNING"} if "never" in r["note"] or "only" in r["note"] else {"INFO"}, f"{r['clip']}: {r['note']}")
         self.report({"INFO"}, f"{r['clip']} ({what}): {r['bones']} кісток, {r['keys']} ключів, {r['effects']} ефектів, {r['duration']:.2f} с — {action.name} → {where}")
         return {"FINISHED"}
 

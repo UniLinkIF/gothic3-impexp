@@ -189,6 +189,27 @@ try:
         sc.render.resolution_x, sc.render.resolution_y = 1280, 720
         sc.render.filepath = os.path.join(OUT, "world_ardea.png")
         bpy.ops.render.render(write_still=True)
+    # 8b. A wolf's ambient loop goes back as the next free variant of that action (the game has 01-05).
+    clear()
+    bpy.ops.gothic3.import_character(name="G3_Wolf_Body_01", with_head=False)
+    arm = next(o for o in bpy.data.objects if o.type == "ARMATURE")
+    bpy.context.view_layer.objects.active = arm
+    arm.select_set(True)
+    r1 = bpy.ops.gothic3.import_motion(clip="Wolf_Stand_None_None_P0_Ambient_Loop_N_Fwd_02_%_00_P0_0")
+    seen.clear()
+    def spy_m(cmd, *args):
+        out = orig(cmd, *args)
+        if cmd == "export-motion":
+            seen["out"] = out
+            seen["spec"] = json.load(open(args[1], encoding="utf-8"))
+        return out
+    core.run = spy_m
+    r = bpy.ops.gothic3.export_motion(clip="Wolf_Stand_None_None_P0_Ambient_Loop_N_Fwd_02_%_00_P0_0", new_variant=True, mode="package", folder=os.path.join(OUT, "wolf_variant"), title="Wolf variant (test)")
+    core.run = orig
+    rep = seen.get("out", {}).get("report", {})
+    check(r1 == {"FINISHED"} and r == {"FINISHED"} and rep.get("new") and rep.get("clip") == "Wolf_Stand_None_None_P0_Ambient_Loop_N_Fwd_06_%_00_P0_0" and rep.get("template", "").endswith("_02_%_00_P0_0"),
+          f"motion as a new variant: {rep.get('clip')} ({rep.get('note')})")
+
     # 9. Terrain: two neighbouring cells in as one welded mesh; back unchanged, nothing is written; a hill raised in
     #    the middle of one, only that cell comes back (mesh, collision, lightmap).
     from gothic3_impexp import terrain
