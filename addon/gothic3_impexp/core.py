@@ -5,7 +5,7 @@ import os
 import subprocess
 import tempfile
 
-from .prefs import prefs
+from .prefs import prefs, texture_dirs
 
 _HERE = os.path.dirname(os.path.realpath(__file__))
 # A packaged add-on ships the exe in bin/; a development checkout finds the cargo build next door.
@@ -49,10 +49,33 @@ def game_dir():
 
 def run(*args):
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    r = subprocess.run([exe(), *args], capture_output=True, text=True, encoding="utf-8", creationflags=flags)
+    # The modder's texture folders, for the core's texture lookup.
+    env = dict(os.environ, G3IE_TEXTURE_DIRS=os.pathsep.join(texture_dirs()))
+    r = subprocess.run([exe(), *args], capture_output=True, text=True, encoding="utf-8", creationflags=flags, env=env)
     if r.returncode != 0:
         raise CoreError(r.stderr.strip() or f"gothic3-core завершився з кодом {r.returncode}")
     return json.loads(r.stdout)
+
+
+def find_texture(filename):
+    """A picture called `filename` (or its stem with another picture extension; any case) in the texture folders of the
+    preferences or their subfolders, four deep; None when there is none."""
+    stem = os.path.splitext(os.path.basename(filename))[0].lower()
+    want = os.path.basename(filename).lower()
+    for top in texture_dirs():
+        found = None
+        for d, subs, files in os.walk(top):
+            if d[len(top):].count(os.sep) >= 4:
+                subs[:] = []
+            subs.sort()
+            for f in files:
+                if f.lower() == want:
+                    return os.path.join(d, f)
+                if found is None and os.path.splitext(f)[0].lower() == stem and os.path.splitext(f)[1].lower() in (".png", ".tga", ".dds", ".jpg", ".jpeg"):
+                    found = os.path.join(d, f)
+        if found:
+            return found
+    return None
 
 
 def package_dir(folder, name):

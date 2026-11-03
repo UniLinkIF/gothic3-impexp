@@ -274,6 +274,35 @@ try:
     check(r == {"FINISHED"} and rep.get("triangles") == 12 and low.get("corners") == 6 and rep.get("lods") == ["_lowpoly"]
           and any(f.endswith("FarTest_Tower_LOWPOLY.xcmsh") for f in rep.get("files", [])), f"far version: {rep.get('lods')} {rep.get('files')}")
 
+    # 12. The modder's texture folders: a picture the game lacks (the helm's specular map, named in its material) comes
+    #     in from there; a Blender image whose file moved is found there by name on export.
+    tdir = os.path.join(OUT, "my textures", "helm")
+    os.makedirs(tdir, exist_ok=True)
+    pic = bpy.data.images.new("tdir_px", 4, 4)
+    pic.pixels = [0.9, 0.9, 0.9, 1.0] * 16
+    for fname in ("G3_Animation_Head_V01_Helmet_Specular_01_S1.png", "Moved_Wood.png"):
+        pic.filepath_raw = os.path.join(tdir, fname)
+        pic.file_format = "PNG"
+        pic.save()
+    bpy.data.images.remove(pic)
+    pr.texture_dirs.clear()
+    pr.texture_dirs.add().path = os.path.join(OUT, "my textures")
+    clear()
+    # The helm's material from step 4 would be shared again; set it up anew.
+    for m in list(bpy.data.materials):
+        bpy.data.materials.remove(m)
+    bpy.ops.gothic3.import_mesh(name="G3_Armor_Helm_Myrtana_01", with_collision=False)
+    helm = bpy.data.objects.get("G3_Armor_Helm_Myrtana_01")
+    specs = [n.image.filepath for m in (helm.data.materials if helm else []) if m and m.node_tree for n in m.node_tree.nodes if n.type == "TEX_IMAGE" and n.get("g3_specular") and n.image]
+    check(any(s.lower().endswith("g3_animation_head_v01_helmet_specular_01_s1.user.png") for s in specs), f"texture from the modder's folder: {specs}")
+    gone = bpy.data.images.new("Moved_Wood.png", 4, 4)
+    gone.source = "FILE"
+    gone.filepath = os.path.join(OUT, "moved away", "Moved_Wood.png")
+    gone.reload()
+    got = export_mesh._image_png(gone, tempfile.mkdtemp(dir=OUT))
+    check(got and os.path.normcase(got) == os.path.normcase(os.path.join(tdir, "Moved_Wood.png")), f"moved image found: {got}")
+    pr.texture_dirs.clear()
+
 except Exception:
     traceback.print_exc()
     fails.append("exception")

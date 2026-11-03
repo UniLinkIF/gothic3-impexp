@@ -67,7 +67,16 @@ def _image_png(img, tmp):
     # copy of the image would have no pixels of its own to save.
     w, h = img.size
     if not w or not h:
-        raise core.CoreError(f"Текстура {img.name}: немає даних зображення (файл не знайдено?)")
+        # Its file moved: the same name in the texture folders of the preferences.
+        found = core.find_texture(img.filepath or img.name) if (img.filepath or img.name) else None
+        if found is None:
+            raise core.CoreError(f"Текстура {img.name}: немає даних зображення (файл не знайдено й у теках текстур з налаштувань)")
+        if found.lower().endswith(".png"):
+            return found
+        img = bpy.data.images.load(found, check_existing=True)
+        w, h = img.size
+        if not w or not h:
+            raise core.CoreError(f"Текстура {img.name}: {found} не читається")
     px = np.empty(w * h * 4, np.float32)
     img.pixels.foreach_get(px)
     if img.is_float and img.colorspace_settings.name != "Non-Color":

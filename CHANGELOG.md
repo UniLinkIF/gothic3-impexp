@@ -17,6 +17,8 @@
 - A replaced building replaces its far version too (`<name>_LOWPOLY`, which the world's distance layer places by file
   name): with `*_LOWPOLY` objects when the selection has them (or the model has them as children), else with the model
   itself. A new model with `*_LOWPOLY` objects gets `gothic3_impexp/<name>_LOWPOLY.xcmsh` for a world editor to place.
+- Your own texture folders (add-on preferences, with subfolders): on import a PNG, TGA or DDS there stands in for the
+  game's texture of that name or one the game lacks; on export an image whose file moved is found there by name.
 - Import keeps the game's double-sided faces (a second face on the same three corners), which Blender's OBJ importer
   dropped.
 
