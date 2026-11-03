@@ -147,6 +147,24 @@ mod tests {
         }
     }
 
+    /// A clip belongs to the actor its name's first word names: Engine.dll `eCWrapper_emfx2Motion::CleanUpMotions`
+    /// ("Can't extract actor prefix from name %s!") cuts the name at its first `_` and takes `G3_<prefix>_Skeleton.FXA`,
+    /// else `G3_<prefix>_Body_01.FXA`. Every clip of the game but the few named otherwise finds its actor so.
+    #[test]
+    fn every_clip_finds_its_actor_by_its_first_word() {
+        let Ok(root) = std::env::var("G3_GAME") else { return };
+        let g = crate::g3::G3Ctx::open_original(std::path::Path::new(&root)).unwrap();
+        let (mut found, mut lost) = (0, std::collections::BTreeMap::<String, usize>::new());
+        for k in g.keys().into_iter().filter(|k| k.starts_with("_compiledanimation/") && k.ends_with(".xmot")) {
+            let name = crate::stem_of(g.path_of(&k).unwrap());
+            let p = name.split('_').next().unwrap();
+            let has = |end: &str| g.find("_compiledanimation", &format!("G3_{p}_{end}.xact")).is_some();
+            if has("Skeleton") || has("Body_01") { found += 1 } else { *lost.entry(p.to_string()).or_default() += 1; }
+        }
+        eprintln!("{found} clips find their actor; not: {lost:?}");
+        assert!(found > 5000 && lost.values().sum::<usize>() < 200, "{lost:?}");
+    }
+
     #[test]
     fn names_are_composed_only_from_the_words() {
         let w = ["Stand", "None", "None", "P0", "Ambient", "Loop", "N", "Fwd"].map(String::from);

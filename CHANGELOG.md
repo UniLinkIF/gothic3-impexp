@@ -29,6 +29,10 @@
 - Motion export **as a new variant** of the clip's action: the next free variant number (the wolf's ambient loops
   01–05 → 06), named the way the game composes clip names. The report says what the game makes of a new name: a
   variant, words the game never composes, or a name it does not look up.
+- Known now, not built: a clip belongs to the actor its name's first word names (Engine.dll
+  `eCWrapper_emfx2Motion::CleanUpMotions`: `G3_<word>_Skeleton.FXA`, else `G3_<word>_Body_01.FXA`; a test holds it on
+  the game's clips). A new creature still needs a template the game places it by, and our actor and clip writers keep
+  the template's skeleton: what is missing is in STATUS.
 - A painted cell repaints the **distant land's picture** over it (the 1024² DXT1 atlas of its distant material): each
   texel moves by what a colour model says the paint changed there (per ground material, colour from layer blend and
   baked brightness, learned from the game's own picture over the shipped cells around), and only the 4×4 blocks
