@@ -403,7 +403,7 @@ pub(crate) fn materials(g: &crate::g3::G3Ctx, specs: &[crate::export::MatSpec], 
         let mname = format!("G3IE_{name}_{:06x}", h & 0xffffff);
         // The shader material of the same name, from a skinned template: the game keeps one (TransformationType 2) for
         // all but 1 of the 193 materials its actors name.
-        let made = crate::export::make_material(g, m, &mname, true, now, &mut files, &mut notes)?;
+        let made = crate::export::make_material(g, m, &mname, true, now, files, notes)?;
         notes.push(format!("{name}: new {mname} ({})", crate::g3_write::look_name(made.template)));
         mats.push(NewMaterial { name: mname, diffuse: made.diffuse, normal: made.normal, specular: made.specular });
     }
