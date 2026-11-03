@@ -99,8 +99,9 @@ pub static MASKED_SPECULAR: Template = Template { material: "G3_Architecture_Dra
 pub static BLEND: Template = Template { material: "G3_Nature_Tree_Root_01_E", roles: &["diffuse"], masked: false, blend: 2 };
 /// Alpha blend with normal and specular maps (the one shipped: a well's glass).
 pub static BLEND_SPECULAR: Template = Template { material: "G3_Desert_Well_Alpha_01", roles: &["diffuse", "normal", "specular"], masked: false, blend: 2 };
-/// Additive glow (BlendMode 7: its colour adds light, black is clear). The game's four glowing materials all move their
-/// texture (rotate, scroll, oscillate), so the glow is the plain blend template with BlendMode 7.
+/// Additive glow: BlendMode 7, which Engine.dll registers as `Brighten` (6 is `Darken`), the mode of the game's light
+/// streaks, magic barrier, glowing crystal and waterfall foam. Those four all move their texture (rotate, scroll,
+/// oscillate), so the glow is the plain blend template with BlendMode 7.
 pub static GLOW: Template = Template { material: "G3_Nature_Tree_Root_01_E", roles: &["diffuse"], masked: false, blend: 7 };
 /// Skinned (TransformationType 2), for actors: opaque — a ranger's body.
 pub static ACTOR_OPAQUE: Template = Template { material: "G3_Animation_Body_Ranger_01_A", roles: &["diffuse", "normal"], masked: false, blend: 0 };
@@ -539,5 +540,44 @@ mod collision_game_tests {
         }
         assert!(bad.is_empty(), "{} of them, e.g. {:#?}", bad.len(), &bad[..bad.len().min(6)]);
         assert!(plain > 300 && genome > 1000, "{plain} plain, {genome} GENOMFLE");
+    }
+}
+
+#[cfg(test)]
+mod engine_tests {
+    /// The value the game's Engine.dll registers for each `eEShaderMaterialBlendMode` name (each name has a small
+    /// function: `push offset name` … `push value`).
+    fn blend_mode_values(dll: &[u8]) -> Vec<(String, u8)> {
+        let pe = u32::from_le_bytes(dll[0x3c..0x40].try_into().unwrap()) as usize;
+        let (nsec, opt) = (u16::from_le_bytes([dll[pe + 6], dll[pe + 7]]) as usize, u16::from_le_bytes([dll[pe + 20], dll[pe + 21]]) as usize);
+        let base = u32::from_le_bytes(dll[pe + 52..pe + 56].try_into().unwrap());
+        let secs: Vec<(u32, u32, u32)> = (0..nsec).map(|i| { let o = pe + 24 + opt + i * 40; let r = |k: usize| u32::from_le_bytes(dll[o + k..o + k + 4].try_into().unwrap()); (r(12), r(16), r(20)) }).collect();
+        let va = |off: usize| secs.iter().find(|s| off as u32 >= s.2 && (off as u32) < s.2 + s.1).map(|s| base + s.0 + off as u32 - s.2);
+        let mut out = vec![];
+        let pre = b"eEShaderMaterialBlendMode_";
+        let mut i = 0;
+        while let Some(p) = dll[i..].windows(pre.len()).position(|w| w == pre).map(|p| p + i) {
+            let end = p + dll[p..].iter().position(|&b| b == 0).unwrap();
+            i = end;
+            if dll[p - 1] != 0 { continue; }
+            let name = String::from_utf8_lossy(&dll[p + pre.len()..end]).into_owned();
+            let push = [&[0x68u8][..], &va(p).unwrap().to_le_bytes()].concat();
+            let Some(c) = dll.windows(5).position(|w| w == push.as_slice()) else { continue };
+            // The first `push imm8` after it (Normal registers with two pushes of 0).
+            if let Some(k) = (c + 5..c + 40).find(|&k| dll[k] == 0x6a) { out.push((name, dll[k + 1])); }
+        }
+        out
+    }
+
+    /// Engine.dll registers BlendMode 7 as Brighten (6 is Darken): the look the game's own four materials of mode 7 —
+    /// light streaks, a magic barrier, a glowing crystal, a waterfall's foam — have, and what the glow templates write.
+    #[test]
+    fn the_engine_calls_blend_mode_7_brighten() {
+        let Ok(root) = std::env::var("G3_GAME") else { return };
+        let dll = std::fs::read(std::path::Path::new(&root).join("Engine.dll")).unwrap();
+        let v = blend_mode_values(&dll);
+        let want: Vec<(String, u8)> = [("Normal", 0), ("Masked", 1), ("AlphaBlend", 2), ("Modulate", 3), ("AlphaModulate", 4), ("Translucent", 5), ("Brighten", 7), ("Darken", 6), ("Invisible", 8)].iter().map(|(n, x)| (n.to_string(), *x)).collect();
+        assert_eq!(v, want);
+        assert!(super::GLOW.blend == 7 && super::ACTOR_GLOW.blend == 7);
     }
 }

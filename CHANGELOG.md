@@ -30,6 +30,7 @@
   placement's lightmap a page per chart at that placement's texel size, its light taken from the old pages at the same
   place. Unchanged parts now also keep the game's charts in the mesh, which the pages they keep belong to (the last
   release wrote them without).
+- The glow look's blend mode 7 is the engine's own `Brighten` (read from Engine.dll, where 6 is `Darken`).
 - Import keeps the game's double-sided faces (a second face on the same three corners), which Blender's OBJ importer
   dropped.
 
