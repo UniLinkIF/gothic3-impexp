@@ -8,6 +8,7 @@ IMPORTS = (
     "gothic3.import_motion",
     "gothic3.import_collision",
     "gothic3.import_world",
+    "gothic3.import_terrain",
 )
 
 
@@ -15,6 +16,7 @@ EXPORTS = (
     "gothic3.export_mesh",
     "gothic3.export_motion",
     "gothic3.export_actor",
+    "gothic3.export_terrain",
 )
 
 

@@ -45,7 +45,31 @@ pub struct CollisionSpec {
 pub struct ConvexSpec { pub geometry: String, pub corners: usize }
 
 #[derive(Deserialize)]
-pub struct Spec { pub name: String, pub geometry: String, pub corners: usize, pub materials: Vec<MatSpec>, pub collision: Option<CollisionSpec> }
+pub struct Spec { pub name: String, pub geometry: String, pub corners: usize, pub materials: Vec<MatSpec>, pub collision: Option<CollisionSpec>, #[serde(default)] pub corner_data: Option<CornerData> }
+
+/// What else the corners carry from Blender (a landscape cell's own colours and uv sets), in `file`: with `colors`,
+/// diffuse u32 (ARGB) then specular u32 per corner; then per stream of `uv_streams` f32×2 per corner (V down). Without
+/// it, a replaced mesh takes these from the nearest vertex of the mesh it replaces.
+#[derive(Deserialize, Default, Clone)]
+pub struct CornerData { pub file: String, #[serde(default)] pub colors: bool, #[serde(default)] pub uv_streams: Vec<u32> }
+
+type Corners = (Option<(Vec<u32>, Vec<u32>)>, Vec<(u32, Vec<[f32; 2]>)>);
+
+fn read_corner_data(c: &CornerData, corners: usize) -> Result<Corners> {
+    let d = std::fs::read(&c.file).with_context(|| format!("read {}", c.file))?;
+    let want = if c.colors { corners * 8 } else { 0 } + c.uv_streams.len() * corners * 8;
+    if d.len() != want { bail!("corner data is {} bytes, expected {want}", d.len()); }
+    let u = |i: usize| u32::from_le_bytes(d[i * 4..i * 4 + 4].try_into().unwrap());
+    let colors = c.colors.then(|| ((0..corners).map(u).collect(), (corners..corners * 2).map(u).collect()));
+    let mut at = if c.colors { corners * 2 } else { 0 };
+    let mut uvs = vec![];
+    for &s in &c.uv_streams {
+        if !crate::g3_res::EXTRA_UV_STREAMS.contains(&s) { bail!("uv stream {s}: the further uv sets are {:?}", crate::g3_res::EXTRA_UV_STREAMS); }
+        uvs.push((s, (0..corners).map(|k| [f32::from_bits(u(at + k * 2)), f32::from_bits(u(at + k * 2 + 1))]).collect()));
+        at += corners * 2;
+    }
+    Ok((colors, uvs))
+}
 
 #[derive(serde::Serialize, Default)]
 pub struct Report { pub name: String, pub replaced: bool, pub vertices: usize, pub triangles: usize, pub materials: Vec<String>, pub collision: Option<String>, pub convex: Option<String>, pub lightmaps: usize, pub lods: Vec<String>, pub files: Vec<String>, pub warnings: Vec<String> }
@@ -291,17 +315,28 @@ pub fn build(g: &G3Ctx, spec: &Spec) -> Result<(Report, Vec<(String, String, Vec
     }
     if mat_names.is_empty() { mat_names.push("G3_Objects_Wood_01_B".into()); }
 
-    // Parts per material: one vertex per (position, normal, uv). Parts without triangles are left out, so the
-    // lightmaps count the same elements as the mesh.
-    let mut parts: Vec<crate::xcmsh_write::Part> = mat_names.iter().map(|m| crate::xcmsh_write::Part { material: m.clone(), positions: vec![], normals: vec![], uvs: vec![], triangles: vec![], diffuse: vec![], specular: vec![] }).collect();
-    let mut seen: Vec<HashMap<[u32; 8], u32>> = vec![HashMap::new(); parts.len()];
+    let (corner_colors, corner_uvs) = match &spec.corner_data { Some(c) => read_corner_data(c, spec.corners)?, None => (None, vec![]) };
+
+    // Parts per material: one vertex per (position, normal, uv and whatever else the corner carries). Parts without
+    // triangles are left out, so the lightmaps count the same elements as the mesh.
+    let mut parts: Vec<crate::xcmsh_write::Part> = mat_names.iter().map(|m| crate::xcmsh_write::Part { material: m.clone(), positions: vec![], normals: vec![], uvs: vec![], triangles: vec![], diffuse: vec![], specular: vec![],
+        extra_uvs: corner_uvs.iter().map(|(s, _)| (*s, vec![])).collect() }).collect();
+    let mut seen: Vec<HashMap<[u32; 16], u32>> = vec![HashMap::new(); parts.len()];
     for t in 0..spec.corners / 3 {
         let mi = (tri_mat[t] as usize).min(parts.len() - 1);
         let p = &mut parts[mi];
         let tri = [0, 1, 2].map(|k| {
             let c = t * 3 + k;
-            let key = [pos[c][0].to_bits(), pos[c][1].to_bits(), pos[c][2].to_bits(), nrm[c][0].to_bits(), nrm[c][1].to_bits(), nrm[c][2].to_bits(), uv[c][0].to_bits(), uv[c][1].to_bits()];
-            *seen[mi].entry(key).or_insert_with(|| { p.positions.push(pos[c]); p.normals.push(nrm[c]); p.uvs.push(uv[c]); p.positions.len() as u32 - 1 })
+            let mut key = [0u32; 16];
+            for (i, x) in pos[c].iter().chain(&nrm[c]).chain(&uv[c]).enumerate() { key[i] = x.to_bits(); }
+            if let Some((d, s)) = &corner_colors { key[8] = d[c]; key[9] = s[c]; }
+            for (i, (_, v)) in corner_uvs.iter().enumerate() { key[10 + i * 2] = v[c][0].to_bits(); key[11 + i * 2] = v[c][1].to_bits(); }
+            *seen[mi].entry(key).or_insert_with(|| {
+                p.positions.push(pos[c]); p.normals.push(nrm[c]); p.uvs.push(uv[c]);
+                if let Some((d, s)) = &corner_colors { p.diffuse.push(d[c]); p.specular.push(s[c]); }
+                for (e, (_, v)) in p.extra_uvs.iter_mut().zip(&corner_uvs) { e.1.push(v[c]); }
+                p.positions.len() as u32 - 1
+            })
         });
         p.triangles.push(tri);
     }
@@ -323,13 +358,18 @@ pub fn build(g: &G3Ctx, spec: &Spec) -> Result<(Report, Vec<(String, String, Vec
         }
     }
     for (key, tpath) in &targets {
-        let mut tparts: Vec<crate::xcmsh_write::Part> = parts.iter().map(|p| crate::xcmsh_write::Part { material: p.material.clone(), positions: p.positions.clone(), normals: p.normals.clone(), uvs: p.uvs.clone(), triangles: p.triangles.clone(), diffuse: vec![], specular: vec![] }).collect();
+        let mut tparts: Vec<crate::xcmsh_write::Part> = parts.iter().map(|p| crate::xcmsh_write::Part { material: p.material.clone(), positions: p.positions.clone(), normals: p.normals.clone(), uvs: p.uvs.clone(), triangles: p.triangles.clone(),
+            diffuse: p.diffuse.clone(), specular: p.specular.clone(), extra_uvs: p.extra_uvs.clone() }).collect();
         let orig = match key { Some(k) => Some(crate::g3_res::decode_xcmsh(&g.read(k)?).with_context(|| format!("{k}: the mesh it replaces"))?), None => None };
         if let Some(o) = &orig {
             let near = nearest_original(o, &tparts);
             for (p, n) in tparts.iter_mut().zip(&near) {
-                p.diffuse = n.iter().map(|&i| o.diffuse[i as usize]).collect();
-                p.specular = n.iter().map(|&i| o.specular[i as usize]).collect();
+                // What Blender did not send comes from the nearest vertex of the mesh replaced: colours, further uv sets.
+                if p.diffuse.is_empty() {
+                    p.diffuse = n.iter().map(|&i| o.diffuse[i as usize]).collect();
+                    p.specular = n.iter().map(|&i| o.specular[i as usize]).collect();
+                }
+                if p.extra_uvs.is_empty() { p.extra_uvs = o.extra_uvs.iter().map(|(s, v)| (*s, n.iter().map(|&i| v[i as usize]).collect())).collect(); }
             }
             lightmaps(g, o, tpath, &near, &mut r, &mut files)?;
         }
@@ -534,7 +574,7 @@ mod tests {
         std::fs::write(&geof, bytes).unwrap();
         let mats = || geo.submeshes.iter().map(|s| MatSpec { name: s.material.trim_end_matches(".xshmat").to_string(), diffuse: None, normal: None, specular: None, alpha_test: None, shape: None }).collect();
         Spec { name: crate::stem_of(key), geometry: geof.to_string_lossy().into_owned(), corners: t.len() * 3, materials: mats(),
-            collision: Some(CollisionSpec { geometry: None, corners: None, material: Some("stone".into()), mode: Some(collision.into()), materials: vec![], convex: vec![] }) }
+            collision: Some(CollisionSpec { geometry: None, corners: None, material: Some("stone".into()), mode: Some(collision.into()), materials: vec![], convex: vec![] }), corner_data: None }
     }
 
     /// The landscape cell written back from its own triangles: same colours, its one lightmap rebuilt to the

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+- **Import → Gothic 3 Terrain**: landscape cells by name or around the 3D cursor, as one mesh welded across the
+  cells' borders, with all a cell carries: the game's materials, its uv map, its colours as corner colour attributes
+  (`g3_diffuse`, whose alpha blends the ground layers, and `g3_light`, the baked brightness), Varant's three further uv
+  sets, and the cell of every face (`g3_cell`). The cells come as the game ships them, without any mod.
+- **Export → Gothic 3 Terrain → Mod**: only the cells that changed are written (mesh, collision from their own
+  triangles, lightmap); a cell that comes back as it went out is left to the game. Painted colours go along as they are.
+- Model export: a replaced mesh with further uv sets (Varant's landscape cells) keeps them; before, they were lost.
+
 ## 0.9.10 — 2026-11-02
 - An export reads the game as it ships without any mod's volume: ours, a package's put in by `INSTALL.bat`, a mod
   launcher's. A volume is a mod's when its files name their place in the archive, not the developers' disks.

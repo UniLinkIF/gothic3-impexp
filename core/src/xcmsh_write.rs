@@ -5,10 +5,11 @@
 //! · u16 30 · u32 2 · properties  BoundingBox bCBox (u16 30, u32 24, min, max) · ResourcePriority float 0
 //! · u16 35 (mesh version) · u16 30 · u32 first element's size hint · f32 0 · u32 elements
 //! element (one per material, version 5, as the game's own):
-//!   u16 5 · u32 FVF (0x1d2: position, normal, diffuse, specular, uv) · f32 min[3] max[3] · u32 size hint
-//!   · "<material>.xshmat" · u32 streams · per stream: u32 type · u16 1 · u8 1 · u32 count · data
-//!     0 indices u32 · 12 uv f32×2 · 5 specular u32 · 4 diffuse u32 · 3 normals f32×3 · 1 positions f32×3
-//!     · 64 tangents f32×3 (× handedness)
+//!   u16 5 · u32 FVF (0x1d2: position, normal, diffuse, specular, uv; 0x4d2 with four uv sets) · f32 min[3] max[3]
+//!   · u32 size hint · "<material>.xshmat" · u32 streams · per stream: u32 type · u16 1 · u8 1 · u32 count · data
+//!     0 indices u32 · (15 uv f32×2) · 12 uv f32×2 · 5 specular u32 · 4 diffuse u32 · 3 normals f32×3
+//!     · 1 positions f32×3 · (21 uv · 18 uv) · 64 tangents f32×3 (× handedness)
+//!     (the bracketed uv sets only where the mesh has them: Varant's landscape cells)
 //!   · u8 1 · u32 0 · u8 1 · u32 0 · u8 1 · u32 0   (two index lists and a batch list, empty as in the landscape)
 //!   · u32 nodes · per node: f32 radius · f32 centre[3] · u32 first · u32 count   (a sphere tree in preorder: a leaf
 //!     has count 1, its triangles run from `first` to the next leaf's `first`; an inner node counts its subtree)
@@ -28,6 +29,8 @@ pub struct Part {
     /// Vertex colours (ARGB); empty = white / opaque black.
     pub diffuse: Vec<u32>,
     pub specular: Vec<u32>,
+    /// Further texture coordinate sets by stream (15, 21, 18), one per vertex, as Varant's landscape cells carry them.
+    pub extra_uvs: Vec<(u32, Vec<[f32; 2]>)>,
 }
 
 /// Default colours of a vertex nothing is known about: white, fully lit.
@@ -133,9 +136,11 @@ pub fn write(parts: &[Part]) -> Vec<u8> {
         let spe: Vec<u32> = if p.specular.len() == nv { p.specular.clone() } else { vec![LIT; nv] };
         let tan = tangents(&p.positions, &p.normals, &uv, &p.triangles);
         let (nodes, order) = sphere_tree(&p.positions, &p.triangles);
-        let streams = 7u32;
+        // Further uv sets in the game's places: stream 15 before the first set, the others after the positions.
+        let extra: Vec<&(u32, Vec<[f32; 2]>)> = p.extra_uvs.iter().filter(|e| e.1.len() == nv).collect();
+        let streams = 7 + extra.len() as u32;
         u16_(&mut o, 5);
-        u32_(&mut o, 0x2 | 0x10 | 0x40 | 0x80 | 0x100);
+        u32_(&mut o, 0x2 | 0x10 | 0x40 | 0x80 | ((1 + extra.len() as u32) << 8));
         let (lo, hi) = bbox(p.positions.iter());
         v3(&mut o, lo); v3(&mut o, hi);
         u32_(&mut o, hint(p));
@@ -145,11 +150,14 @@ pub fn write(parts: &[Part]) -> Vec<u8> {
         let head = |o: &mut Vec<u8>, ty: u32, n: usize| { u32_(o, ty); u16_(o, 1); o.push(1); u32_(o, n as u32); };
         head(&mut o, 0, p.triangles.len() * 3);
         for t in &p.triangles { for i in t { u32_(&mut o, *i); } }
-        head(&mut o, 12, nv); for x in &uv { f(&mut o, x[0]); f(&mut o, x[1]); }
+        let uvs = |o: &mut Vec<u8>, ty: u32, v: &[[f32; 2]]| { head(o, ty, v.len()); for x in v { f(o, x[0]); f(o, x[1]); } };
+        for e in extra.iter().filter(|e| e.0 == 15) { uvs(&mut o, e.0, &e.1); }
+        uvs(&mut o, 12, &uv);
         head(&mut o, 5, nv); for x in &spe { u32_(&mut o, *x); }
         head(&mut o, 4, nv); for x in &dif { u32_(&mut o, *x); }
         head(&mut o, 3, nv); for x in &p.normals { v3(&mut o, *x); }
         head(&mut o, 1, nv); for x in &p.positions { v3(&mut o, *x); }
+        for e in extra.iter().filter(|e| e.0 != 15) { uvs(&mut o, e.0, &e.1); }
         head(&mut o, 64, nv); for x in &tan { v3(&mut o, *x); }
         for _ in 0..3 { o.push(1); u32_(&mut o, 0); }
         u32_(&mut o, nodes.len() as u32);
@@ -189,10 +197,13 @@ mod tests {
                     triangles: idx.chunks_exact(3).map(|c| [c[0] - lo, c[1] - lo, c[2] - lo]).collect(),
                     diffuse: m.diffuse[r.clone()].to_vec(),
                     specular: m.specular[r.clone()].to_vec(),
+                    extra_uvs: m.extra_uvs.iter().map(|(t, v)| (*t, v[r.clone()].to_vec())).collect(),
                 }
             }).collect();
             let bm = crate::g3_res::decode_xcmsh(&super::write(&parts)).unwrap_or_else(|e| panic!("{k}: {e:#}"));
-            assert_eq!(bm.streams, vec![0, 12, 5, 4, 3, 1, 64], "{k}");
+            let has = |t: u32| m.extra_uvs.iter().any(|e| e.0 == t);
+            let want: Vec<u32> = [(0, true), (15, has(15)), (12, true), (5, true), (4, true), (3, true), (1, true), (21, has(21)), (18, has(18)), (64, true)].into_iter().filter(|x| x.1).map(|x| x.0).collect();
+            assert_eq!(bm.streams, want, "{k}");
             let cols = |m: &crate::g3_res::G3Mesh| -> Vec<(u32, u32)> { m.geo.indices.iter().map(|&i| (m.diffuse[i as usize], m.specular[i as usize])).collect() };
             assert_eq!(cols(&m), cols(&bm), "{k} colours");
             let back = bm.geo;

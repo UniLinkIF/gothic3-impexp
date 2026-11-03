@@ -189,6 +189,86 @@ try:
         sc.render.resolution_x, sc.render.resolution_y = 1280, 720
         sc.render.filepath = os.path.join(OUT, "world_ardea.png")
         bpy.ops.render.render(write_still=True)
+    # 9. Terrain: two neighbouring cells in as one welded mesh; back unchanged, nothing is written; a hill raised in
+    #    the middle of one, only that cell comes back (mesh, collision, lightmap).
+    from gothic3_impexp import terrain
+    import numpy as np
+    clear()
+    r = bpy.ops.gothic3.import_terrain(cells="myrtana_landscape_cell_244 myrtana_landscape_cell_245")
+    ob = next((o for o in bpy.data.objects if o.get("g3_terrain")), None)
+    cells = json.loads(ob["g3_terrain"]) if ob else []
+    me = ob.data if ob else None
+    cell = np.empty(len(me.polygons), np.int32) if me else None
+    if me:
+        me.attributes["g3_cell"].data.foreach_get("value", cell)
+    check(r == {"FINISHED"} and [c["name"].lower() for c in cells] == ["g3_myrtana_landscape_cell_244", "g3_myrtana_landscape_cell_245"] and set(np.unique(cell)) == {0, 1}
+          and "g3_diffuse" in me.color_attributes and "g3_light" in me.color_attributes and len(me.materials) >= 8,
+          f"terrain import: {len(me.polygons) if me else 0} faces, cells {cells}")
+
+    def export_spec(o):
+        t = tempfile.mkdtemp(dir=OUT)
+        sp = os.path.join(t, "terrain.json")
+        with open(sp, "w", encoding="utf-8") as f:
+            json.dump({"cells": terrain.gather_cells(bpy.context, o, 0.01, t)}, f)
+        return sp
+    try:
+        core.run("export-terrain", pr.game_dir, export_spec(ob), "package", os.path.join(OUT, "terrain_same"), "T")
+        same = "exported"
+    except core.CoreError as e:
+        same = str(e)
+    check("nothing to export" in same, f"unchanged terrain: {same}")
+    # A hill of 3 m on cell 244's middle (faces of that cell only).
+    co = np.empty(len(me.vertices) * 3, np.float32)
+    me.vertices.foreach_get("co", co)
+    co = co.reshape(-1, 3)
+    fv = np.array([list(p.vertices) for p in me.polygons if cell[p.index] == 0]).ravel()
+    mid = co[fv].mean(axis=0)
+    d = np.hypot(co[:, 0] - mid[0], co[:, 1] - mid[1])
+    co[:, 2] += np.where(d < 20.0, 3.0 * (1.0 - d / 20.0), 0.0)
+    me.vertices.foreach_set("co", co.ravel())
+    me.update()
+    bpy.ops.object.select_all(action="DESELECT")
+    ob.select_set(True)
+    bpy.context.view_layer.objects.active = ob
+    seen.clear()
+    def spy_t(cmd, *args):
+        out = orig(cmd, *args)
+        if cmd == "export-terrain":
+            seen["out"] = out
+        return out
+    core.run = spy_t
+    pkg = os.path.join(OUT, "terrain_pkg")
+    r = bpy.ops.gothic3.export_terrain(mode="package", folder=pkg, title="Hill (test)")
+    core.run = orig
+    rep = seen.get("out", {}).get("report", {})
+    files = sorted(os.listdir(pkg)) if os.path.isdir(pkg) else []
+    check(r == {"FINISHED"} and [c.lower() for c in rep.get("changed", [])] == ["g3_myrtana_landscape_cell_244"] and len(rep.get("unchanged", [])) == 1 and rep.get("lightmaps") == 1
+          and {"_compiledMesh.vol", "Lightmaps.vol"} <= set(files) and any(f.lower().endswith("cell_244.xnvmsh") for f in rep.get("files", [])),
+          f"terrain hill: {rep.get('changed')} / {rep.get('unchanged')}, {files}")
+
+    # 9b. A Varant cell keeps its four uv sets; painting its layer blend is a change.
+    clear()
+    r = bpy.ops.gothic3.import_terrain(cells="varant_landscape_cell_244")
+    ob = next((o for o in bpy.data.objects if o.get("g3_terrain")), None)
+    me = ob.data
+    check(r == {"FINISHED"} and all(f"g3_uv{s}" in me.uv_layers for s in (15, 21, 18)), f"varant uv sets: {[u.name for u in me.uv_layers]}")
+    try:
+        core.run("export-terrain", pr.game_dir, export_spec(ob), "package", os.path.join(OUT, "terrain_same2"), "T")
+        same = "exported"
+    except core.CoreError as e:
+        same = str(e)
+    check("nothing to export" in same, f"unchanged varant cell: {same}")
+    ca = me.color_attributes["g3_diffuse"]
+    c = np.empty(len(ca.data) * 4, np.float32)
+    ca.data.foreach_get("color_srgb", c)
+    c[3:400:4] = 0.0
+    ca.data.foreach_set("color_srgb", c)
+    seen.clear()
+    core.run = spy_t
+    r = bpy.ops.gothic3.export_terrain(mode="package", folder=os.path.join(OUT, "terrain_paint"), title="Paint (test)")
+    core.run = orig
+    rep = seen.get("out", {}).get("report", {})
+    check(r == {"FINISHED"} and [c.lower() for c in rep.get("changed", [])] == ["g3_varant_landscape_cell_244"], f"painted varant cell: {rep.get('changed')}")
 except Exception:
     traceback.print_exc()
     fails.append("exception")

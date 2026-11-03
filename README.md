@@ -20,6 +20,7 @@ Import and export **Gothic 3** (Piranha Bytes, 2006, Genome engine) models, char
 | Gothic 3 Animations | `.xmot` | animations onto the selected Gothic 3 skeleton: one clip or a whole category — idle, movement, attacks, defence, dialogue and gestures, sitting and lying, interaction, death |
 | Gothic 3 Collision | `.xnvmsh` | only the collision, as a wireframe mesh; one `G3_Shape_<surface>` material per surface (stone, wood, earth…), and an item's convex body. A landscape cell's collision is its own triangles |
 | Gothic 3 World Layer | `.node` | what one world layer places (search by name, e.g. `ardea_dynamic_objects`) and, within a radius, the houses and rocks of the static cells and the ground — context to build a new model against where it will stand (placing it is a world editor's job). Each mesh is loaded once and linked at each placement |
+| Gothic 3 Terrain | landscape cells `.xcmsh` | cells by name or around the 3D cursor as one mesh to edit, welded across the cells' borders: the game's materials, the uv map, the colours as corner colour attributes (`g3_diffuse`: its alpha blends the ground layers; `g3_light`: the baked brightness), Varant's further uv sets, the cell of every face (`g3_cell`) |
 
 **File → Export** — three ways out: **a mod file** `.g3mod` (the default; one file in the game's `Mods` folder that a mod launcher puts in and takes out, and the easy way to share), install straight into the game, or a package with `INSTALL.bat` / `ROLLBACK.bat`:
 
@@ -27,6 +28,7 @@ Import and export **Gothic 3** (Piranha Bytes, 2006, Genome engine) models, char
 |---|---|
 | Gothic 3 Model → Mod | `.xcmsh` replacing the game's mesh of the same name or a new one, new materials (`.xshmat` from game templates: opaque, specular, alpha test) and images (`.ximg`), collision (`.xnvmsh`, from the `*_COL` objects or the model itself; for the landscape always from the model) with surfaces by material, and an item's convex body (`*_CV`, from the `*_CV` objects or the model's own shape). Replacing a game model takes its vertex colours and lighting (the lightmaps of all its placements in the world) from the nearest old vertices, and replaces its `_lod1` too |
 | Gothic 3 Motion → Mod | a `.xmot` replacing one of the game's clips (by default the one the action came from) or a new clip beside it; IK and other constraints go in as their result; frame effects (footsteps, sounds) from the action's list, edited in the Gothic 3 tab |
+| Gothic 3 Terrain → Mod | the cells of a terrain object that changed (shape, painted colours, materials): mesh, collision from its triangles, lightmap; a cell as it came out is left to the game |
 | Gothic 3 Actor → Mod | a `.xact` — your mesh on a game skeleton (armour, bodies, heads, creatures; several Blender objects become its one mesh, a material each), weights from vertex groups |
 
 Mods go into the game as a patch volume per archive (`Data\_compiledMesh.pNN` and so on, after the game's own), the way

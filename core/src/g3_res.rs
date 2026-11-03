@@ -24,7 +24,18 @@ impl<'a> Rd<'a> {
 }
 
 /// The common archive head of a plain Gothic 3 resource, up to the class data (property section skipped).
-fn resource_head(r: &mut Rd, class: &str) -> Result<()> {
+fn resource_head(r: &mut Rd, class: &str) -> Result<()> { resource_property(r, class, "").map(|_| ()) }
+
+/// The mesh's own box (`BoundingBox`, cm, game axes) from its property section, without reading its vertices.
+pub fn xcmsh_box(bytes: &[u8]) -> Result<([f32; 3], [f32; 3])> {
+    let b = resource_property(&mut Rd::open(bytes)?, "eCResourceMeshComplex_PS", "BoundingBox")?.context("the mesh has no BoundingBox")?;
+    let f = |i: usize| f32::from_le_bytes(b[i * 4..i * 4 + 4].try_into().unwrap());
+    if b.len() < 24 { bail!("BoundingBox of {} bytes", b.len()); }
+    Ok(([f(0), f(1), f(2)], [f(3), f(4), f(5)]))
+}
+
+/// `resource_head`, keeping the value of property `want` on the way.
+fn resource_property(r: &mut Rd, class: &str, want: &str) -> Result<Option<Vec<u8>>> {
     if r.u16()? != 1 || r.u8()? != 1 || r.u16()? != 1 || r.u8()? != 1 { bail!("not a Gothic 3 resource archive"); }
     let c = r.str()?;
     if c != class { bail!("class {c}, expected {class}"); }
@@ -34,14 +45,27 @@ fn resource_head(r: &mut Rd, class: &str) -> Result<()> {
     if ver < 81 { r.str()?; }
     if ver < 82 { r.skip(20)?; }
     r.u16()?;
-    for _ in 0..r.u32()? { r.str()?; r.str()?; r.u16()?; let n = r.u32()? as usize; r.skip(n)?; }
-    Ok(())
+    let mut found = None;
+    for _ in 0..r.u32()? {
+        let name = r.str()?;
+        r.str()?;
+        r.u16()?;
+        let n = r.u32()? as usize;
+        let v = r.take(n)?;
+        if !want.is_empty() && name == want { found = Some(v.to_vec()); }
+    }
+    Ok(found)
 }
 
 /// A decoded `.xcmsh` (`eCResourceMeshComplex_PS`): one submesh per mesh element, the vertices of all elements
 /// concatenated. Material names keep their `.xshmat` extension. Vertex colours (streams 4 and 5) per vertex, white /
-/// opaque black where an element has none. `elements`: (first vertex, vertices) of each element.
-pub struct G3Mesh { pub geo: crate::geom::MeshGeometry, pub streams: Vec<u32>, pub colors: bool, pub diffuse: Vec<u32>, pub specular: Vec<u32>, pub elements: Vec<(u32, u32)> }
+/// opaque black where an element has none. `elements`: (first vertex, vertices) of each element. `extra_uvs`: the
+/// further texture coordinate sets per vertex by stream (15, 21, 18: Varant's landscape cells have four sets, FVF
+/// `TEX4`), zero where an element has none.
+pub struct G3Mesh { pub geo: crate::geom::MeshGeometry, pub streams: Vec<u32>, pub colors: bool, pub diffuse: Vec<u32>, pub specular: Vec<u32>, pub elements: Vec<(u32, u32)>, pub extra_uvs: Vec<(u32, Vec<[f32; 2]>)> }
+
+/// The texture coordinate streams after the first (12), in the order the game's files have them.
+pub const EXTRA_UV_STREAMS: [u32; 3] = [15, 21, 18];
 
 pub fn decode_xcmsh(bytes: &[u8]) -> Result<G3Mesh> {
     let mut r = Rd::open(bytes)?;
@@ -58,6 +82,7 @@ pub fn decode_xcmsh(bytes: &[u8]) -> Result<G3Mesh> {
     let mut colors = false;
     let (mut diffuse, mut specular) = (vec![], vec![]);
     let mut ranges = vec![];
+    let mut extra: Vec<(u32, Vec<[f32; 2]>)> = vec![];
     for _ in 0..elements {
         let ever = r.u16()?;
         r.u32()?;
@@ -66,6 +91,7 @@ pub fn decode_xcmsh(bytes: &[u8]) -> Result<G3Mesh> {
         let base = g.positions.len() as u32;
         let first_index = g.indices.len() as u32;
         let (mut pos, mut nrm, mut uv, mut idx, mut dif, mut spe) = (vec![], vec![], vec![], vec![], vec![], vec![]);
+        let mut more: Vec<(u32, Vec<[f32; 2]>)> = vec![];
         for _ in 0..r.u32()? {
             let ty = r.u32()?;
             r.skip(3)?;
@@ -79,7 +105,8 @@ pub fn decode_xcmsh(bytes: &[u8]) -> Result<G3Mesh> {
                 4 => { colors = true; for _ in 0..n { dif.push(r.u32()?) } }
                 5 => { colors = true; for _ in 0..n { spe.push(r.u32()?) } }
                 6 => r.skip(n * 4)?,
-                15 | 18 | 21 | 73 => r.skip(n * 8)?,
+                15 | 18 | 21 => { let mut v = Vec::with_capacity(n); for _ in 0..n { v.push([r.f32()?, r.f32()?]); } more.push((ty, v)); }
+                73 => r.skip(n * 8)?,
                 64 | 72 => r.skip(n * 12)?,
                 2 => r.skip(n * 16)?,
                 t => bail!("unknown vertex stream type {t}"),
@@ -97,6 +124,12 @@ pub fn decode_xcmsh(bytes: &[u8]) -> Result<G3Mesh> {
         let before = g.positions.len();
         if !nrm.is_empty() || !g.normals.is_empty() { g.normals.resize(before, [0.0, 1.0, 0.0]); if nrm.is_empty() { nrm.resize(nv, [0.0, 1.0, 0.0]); } }
         if !uv.is_empty() || !g.uvs.is_empty() { g.uvs.resize(before, [0.0, 0.0]); if uv.is_empty() { uv.resize(nv, [0.0, 0.0]); } }
+        for (ty, v) in more {
+            if v.len() != nv { bail!("{material}: stream {ty} has {} of {nv} vertices", v.len()); }
+            let i = match extra.iter().position(|e| e.0 == ty) { Some(i) => i, None => { extra.push((ty, vec![])); extra.len() - 1 } };
+            extra[i].1.resize(before, [0.0; 2]);
+            extra[i].1.extend(v);
+        }
         dif.resize(nv, 0xffff_ffff);
         spe.resize(nv, 0xff00_0000);
         ranges.push((before as u32, nv as u32));
@@ -108,7 +141,9 @@ pub fn decode_xcmsh(bytes: &[u8]) -> Result<G3Mesh> {
         g.indices.extend(idx.iter().map(|i| i + base));
         g.submeshes.push(crate::geom::SubRange { material, first_index, index_count: g.indices.len() as u32 - first_index });
     }
-    Ok(G3Mesh { geo: g, streams, colors, diffuse, specular, elements: ranges })
+    for e in extra.iter_mut() { e.1.resize(g.positions.len(), [0.0; 2]); }
+    extra.sort_by_key(|e| EXTRA_UV_STREAMS.iter().position(|&t| t == e.0));
+    Ok(G3Mesh { geo: g, streams, colors, diffuse, specular, elements: ranges, extra_uvs: extra })
 }
 
 /// Strings of a `GENOMFLE` file's string table (u32 table offset at 10; at the table: u32 magic, u8, u32 count,

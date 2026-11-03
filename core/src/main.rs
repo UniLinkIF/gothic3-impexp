@@ -27,6 +27,11 @@
 //! gothic3-core world <game> <layer> <radius cm> <out dir> [noground]
 //!                                                           a layer as context: its placements and, within the radius,
 //!                                                           the static cells' and the landscape, meshes as OBJ
+//! gothic3-core terrain-cells <game>                         the landscape cells: name, land, box over the ground
+//! gothic3-core terrain <game> <cells | @x,z,r> <out dir>    landscape cells to edit, with all they carry (.g3terrain)
+//! gothic3-core export-terrain <game> <spec.json> install <mod> | package <folder> <title>
+//!                                                           | mod <file.g3mod> <name> [author]
+//!                                                           the edited cells back (unchanged ones are left out)
 //! ```
 
 mod cook;
@@ -45,6 +50,7 @@ mod geom;
 mod glb;
 mod lightmap;
 mod staticmesh;
+mod terrain;
 mod textures;
 mod volume;
 mod world;
@@ -180,6 +186,22 @@ fn run(args: &[String]) -> Result<serde_json::Value> {
             let radius: f32 = a(4).context("radius (cm)")?.parse().context("radius (cm)")?;
             world::area_obj(&g, a(3).context("world layer")?, radius, a(6) != Some("noground"), Path::new(a(5).context("out dir")?))?
         }
+        (Some("terrain-cells"), Some(game)) => serde_json::to_value(terrain::cells(&open(game)?)?)?,
+        (Some("terrain"), Some(game)) => {
+            // The cells as the game ships them: what the export compares with and writes over.
+            let g = g3::G3Ctx::open_original(Path::new(game))?;
+            let cells = terrain::select(&terrain::cells(&g)?, a(3).context("cells or @x,z,radius")?)?;
+            terrain::export_cells(&g, &cells, Path::new(a(4).context("out dir")?))?
+        }
+        (Some("export-terrain"), Some(game)) => {
+            // Cells are compared with, and written over, the game's own.
+            let g = g3::G3Ctx::open_original(Path::new(game))?;
+            let spec: terrain::TerrainSpec = serde_json::from_str(&std::fs::read_to_string(a(3).context("spec.json")?)?).context("terrain spec")?;
+            let (report, files) = terrain::build(&g, &spec)?;
+            let mut out = mods::deliver(Path::new(game), a(4).unwrap_or("install"), a(5).context("mod name, package folder or mod file")?, a(6).unwrap_or(""), a(7).unwrap_or(""), &files)?;
+            out["report"] = serde_json::to_value(report)?;
+            out
+        }
         (Some("installed"), Some(game)) => serde_json::to_value(mods::installed(Path::new(game))?)?,
         (Some("uninstall"), Some(game)) => { mods::uninstall(Path::new(game), a(3).context("mod name")?)?; serde_json::json!(true) }
         _ => bail!("usage: gothic3-core keys|find|mesh|collision|clips|actor|export|installed|uninstall <game folder> …"),
@@ -246,7 +268,8 @@ mod release_tests {
         let bl: Vec<&str> = bl[..bl.find(')').unwrap()].split(',').map(str::trim).collect();
         assert_eq!(bl.join("."), v, "bl_info version vs the manifest's");
         let changelog = read("CHANGELOG.md");
-        assert!(changelog.lines().find(|l| l.starts_with("## ")).unwrap().starts_with(&format!("## {v} ")), "CHANGELOG has no {v} on top");
+        // Work merged after the release waits under `## Unreleased` above it.
+    assert!(changelog.lines().find(|l| l.starts_with("## ") && *l != "## Unreleased").unwrap().starts_with(&format!("## {v} ")), "CHANGELOG has no {v} on top");
         for readme in ["README.md", "README.uk.md"] { assert!(read(readme).contains(&format!("gothic3_impexp-{v}.zip")), "{readme} names another zip than {v}"); }
         assert!(read("STATUS.md").contains(&format!("**{v}**")), "STATUS is not at {v}");
     }
