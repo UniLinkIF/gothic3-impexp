@@ -112,7 +112,7 @@ pub struct CellSpec { pub name: String, pub geometry: String, pub corners: usize
 pub struct TerrainSpec { pub cells: Vec<CellSpec>, #[serde(default)] pub collision: Option<String> }
 
 #[derive(serde::Serialize, Default)]
-pub struct TerrainReport { pub changed: Vec<String>, pub unchanged: Vec<String>, pub files: Vec<String>, pub lightmaps: usize, pub warnings: Vec<String> }
+pub struct TerrainReport { pub changed: Vec<String>, pub unchanged: Vec<String>, pub files: Vec<String>, pub lightmaps: usize, pub warnings: Vec<String>, pub distant: Vec<String> }
 
 /// Corners of a cell as (material, position cm, uv, diffuse, specular, further uvs) per triangle corner.
 type Corner = (String, [f32; 3], [f32; 2], u32, u32, Vec<[f32; 2]>);
@@ -162,10 +162,18 @@ fn same_cell(game: &[Corner], ours: &[Corner], colors: bool) -> bool {
 pub fn build(g: &G3Ctx, spec: &TerrainSpec) -> Result<(TerrainReport, Vec<(String, String, Vec<u8>)>)> {
     let mut r = TerrainReport::default();
     let mut files = vec![];
+    let mut changes: Vec<crate::lowpoly::Change> = vec![];
     for c in &spec.cells {
         let key = crate::staticmesh::mesh_key(g, &c.name).filter(|k| is_cell(k)).with_context(|| format!("{}: not a landscape cell of the game", c.name))?;
         let stock = crate::g3_res::decode_xcmsh(&g.read(&key)?).with_context(|| key.clone())?;
-        if same_cell(&game_corners(&stock), &spec_corners(c)?, c.corner_data.as_ref().is_some_and(|d| d.colors)) { r.unchanged.push(c.name.clone()); continue; }
+        let ours = spec_corners(c)?;
+        if same_cell(&game_corners(&stock), &ours, c.corner_data.as_ref().is_some_and(|d| d.colors)) { r.unchanged.push(c.name.clone()); continue; }
+        // Where the ground moved, for the distant land (10 m around it, where the tile's triangles reach in).
+        let edited: Vec<[f32; 3]> = ours.iter().map(|x| x.1).collect();
+        if let Some(area) = crate::lowpoly::changed_area(&stock.geo.positions, &edited, 1000.0) {
+            let stock_t = stock.geo.indices.chunks_exact(3).map(|t| [0, 1, 2].map(|i| stock.geo.positions[t[i] as usize])).collect();
+            changes.push(crate::lowpoly::Change { stock: crate::lowpoly::Heights::new(stock_t), edited: crate::lowpoly::Heights::new(edited.chunks_exact(3).map(|t| [t[0], t[1], t[2]]).collect()), area });
+        }
         let s = Spec { name: c.name.clone(), geometry: c.geometry.clone(), corners: c.corners, materials: c.materials.iter().map(|m| MatSpec { name: m.name.clone(), diffuse: m.diffuse.clone(), normal: m.normal.clone(), specular: m.specular.clone(), alpha_test: m.alpha_test, shape: m.shape.clone() }).collect(),
             collision: Some(export::CollisionSpec { geometry: None, corners: None, material: Some("earth".into()), mode: Some(spec.collision.clone().unwrap_or_else(|| "auto".into())), materials: vec![], convex: vec![] }), corner_data: c.corner_data.clone() };
         let (rep, f) = export::build(g, &s).with_context(|| c.name.clone())?;
@@ -176,6 +184,16 @@ pub fn build(g: &G3Ctx, spec: &TerrainSpec) -> Result<(TerrainReport, Vec<(Strin
         files.extend(f);
     }
     if r.changed.is_empty() { bail!("no cell has changed ({} as the game has them) — nothing to export", r.unchanged.len()); }
+    // The distant land over the moved ground follows.
+    if !changes.is_empty() {
+        let all: Vec<&crate::lowpoly::Change> = changes.iter().collect();
+        for (k, _) in crate::lowpoly::tiles(g)?.into_iter().filter(|(_, a)| changes.iter().any(|c| a[0] <= c.area[2] && c.area[0] <= a[2] && a[1] <= c.area[3] && c.area[1] <= a[3])) {
+            if let Some((bytes, _)) = crate::lowpoly::follow(&g.read(&k)?, &all).with_context(|| k.clone())? {
+                r.distant.push(crate::stem_of(g.path_of(&k).unwrap_or(&k)));
+                files.push(("_compiledMesh".to_string(), g.path_of(&k).unwrap_or(&k).to_string(), bytes));
+            }
+        }
+    }
     r.files = files.iter().map(|(a, p, _)| format!("{a}/{p}")).collect();
     Ok((r, files))
 }
@@ -303,7 +321,20 @@ mod tests {
             let mesh = files.iter().find(|f| f.1.to_lowercase().ends_with(&format!("{}.xcmsh", first.to_lowercase()))).expect("the cell's mesh");
             assert!(files.iter().any(|f| f.1.to_lowercase().ends_with(&format!("{}.xnvmsh", first.to_lowercase())) && f.0 == "_compiledMesh"), "{:?}", r.files);
             assert_eq!(r.lightmaps, 1, "{:?}", r.files);
-            assert!(files.iter().all(|f| f.1.to_lowercase().contains(&first.to_lowercase())), "{:?}", r.files);
+            // The cell's files, and the distant land over it.
+            assert!(!r.distant.is_empty(), "{query}: no distant tile followed");
+            let mut checked = 0;
+            assert!(files.iter().all(|f| f.1.to_lowercase().contains(&first.to_lowercase()) || f.1.to_lowercase().contains("_landscape_lowpoly_")), "{:?}", r.files);
+            for t in &r.distant {
+                let f = files.iter().find(|f| f.1.to_lowercase().ends_with(&format!("{}.xcmsh", t.to_lowercase()))).unwrap();
+                let (tile, old) = (crate::g3_res::decode_xcmsh(&f.2).unwrap(), crate::g3_res::decode_xcmsh(&g.read(&crate::staticmesh::mesh_key(&g, t).unwrap()).unwrap()).unwrap());
+                let (a, b) = (crate::lowpoly::Heights::new(tile.geo.indices.chunks_exact(3).map(|x| [0, 1, 2].map(|i| tile.geo.positions[x[i] as usize])).collect()), crate::lowpoly::Heights::new(old.geo.indices.chunks_exact(3).map(|x| [0, 1, 2].map(|i| old.geo.positions[x[i] as usize])).collect()));
+                // Raised 2 m in the middle of the cell, if the tile is there.
+                let c = sel[0].area;
+                let (x, z) = ((c[0] + c[2]) / 2.0, (c[1] + c[3]) / 2.0);
+                if let (Some(h), Some(o)) = (a.at(x, z), b.at(x, z)) { assert!((h - o - 200.0).abs() < 1.0, "{t}: {o} -> {h}"); checked += 1; }
+            }
+            assert_eq!(checked, 1, "{query}: the cell's middle under one distant tile ({:?})", r.distant);
             let ours = crate::g3_res::decode_xcmsh(&mesh.2).unwrap();
             let game = crate::g3_res::decode_xcmsh(&g.read(&sel[0].key).unwrap()).unwrap();
             assert_eq!(ours.streams, game.streams, "{query}: streams");

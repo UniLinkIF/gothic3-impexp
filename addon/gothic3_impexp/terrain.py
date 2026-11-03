@@ -106,7 +106,7 @@ def build_object(out, scale, name="G3 Terrain"):
     """The cells written by `gothic3-core terrain` as one welded mesh object."""
     cells = out["cells"]
     tex_dir = os.path.dirname(cells[0]["file"]) if cells else ""
-    all_streams = sorted({s for c in cells for s in c["uv_streams"]}, key=[15, 21, 18].index)
+    all_streams = sorted({s for c in cells for s in c["uv_streams"]}, key=[15, 21, 18, 73].index)
     P, UV, DIF, SPE, T, M, C = [], [], [], [], [], [], []
     EX = {s: [] for s in all_streams}
     base = 0
@@ -315,6 +315,8 @@ class G3_OT_export_terrain(bpy.types.Operator):
         if self.mode == "install":
             from . import ui
             ui.refresh()
+        if r.get("distant"):
+            self.report({"INFO"}, f"далекий вигляд землі слідом: {', '.join(r['distant'])}")
         self.report({"INFO"}, f"Рельєф: змінено {len(r['changed'])} ({', '.join(r['changed'])}), без змін {len(r['unchanged'])} → {where}")
         return {"FINISHED"}
 

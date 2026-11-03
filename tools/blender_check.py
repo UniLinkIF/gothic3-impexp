@@ -264,8 +264,8 @@ try:
     rep = seen.get("out", {}).get("report", {})
     files = sorted(os.listdir(pkg)) if os.path.isdir(pkg) else []
     check(r == {"FINISHED"} and [c.lower() for c in rep.get("changed", [])] == ["g3_myrtana_landscape_cell_244"] and len(rep.get("unchanged", [])) == 1 and rep.get("lightmaps") == 1
-          and {"_compiledMesh.vol", "Lightmaps.vol"} <= set(files) and any(f.lower().endswith("cell_244.xnvmsh") for f in rep.get("files", [])),
-          f"terrain hill: {rep.get('changed')} / {rep.get('unchanged')}, {files}")
+          and {"_compiledMesh.vol", "Lightmaps.vol"} <= set(files) and any(f.lower().endswith("cell_244.xnvmsh") for f in rep.get("files", [])) and rep.get("distant"),
+          f"terrain hill: {rep.get('changed')} / {rep.get('unchanged')}, distant {rep.get('distant')}, {files}")
 
     # 9b. A Varant cell keeps its four uv sets; painting its layer blend is a change.
     clear()

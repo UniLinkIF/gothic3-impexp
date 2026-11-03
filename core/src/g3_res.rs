@@ -61,11 +61,11 @@ fn resource_property(r: &mut Rd, class: &str, want: &str) -> Result<Option<Vec<u
 /// concatenated. Material names keep their `.xshmat` extension. Vertex colours (streams 4 and 5) per vertex, white /
 /// opaque black where an element has none. `elements`: (first vertex, vertices) of each element. `extra_uvs`: the
 /// further texture coordinate sets per vertex by stream (15, 21, 18: Varant's landscape cells have four sets, FVF
-/// `TEX4`), zero where an element has none.
+/// `TEX4`; 73: the distant land's second set), zero where an element has none.
 pub struct G3Mesh { pub geo: crate::geom::MeshGeometry, pub streams: Vec<u32>, pub colors: bool, pub diffuse: Vec<u32>, pub specular: Vec<u32>, pub elements: Vec<(u32, u32)>, pub extra_uvs: Vec<(u32, Vec<[f32; 2]>)> }
 
 /// The texture coordinate streams after the first (12), in the order the game's files have them.
-pub const EXTRA_UV_STREAMS: [u32; 3] = [15, 21, 18];
+pub const EXTRA_UV_STREAMS: [u32; 4] = [15, 21, 18, 73];
 
 pub fn decode_xcmsh(bytes: &[u8]) -> Result<G3Mesh> {
     let mut r = Rd::open(bytes)?;
@@ -105,8 +105,7 @@ pub fn decode_xcmsh(bytes: &[u8]) -> Result<G3Mesh> {
                 4 => { colors = true; for _ in 0..n { dif.push(r.u32()?) } }
                 5 => { colors = true; for _ in 0..n { spe.push(r.u32()?) } }
                 6 => r.skip(n * 4)?,
-                15 | 18 | 21 => { let mut v = Vec::with_capacity(n); for _ in 0..n { v.push([r.f32()?, r.f32()?]); } more.push((ty, v)); }
-                73 => r.skip(n * 8)?,
+                15 | 18 | 21 | 73 => { let mut v = Vec::with_capacity(n); for _ in 0..n { v.push([r.f32()?, r.f32()?]); } more.push((ty, v)); }
                 64 | 72 => r.skip(n * 12)?,
                 2 => r.skip(n * 16)?,
                 t => bail!("unknown vertex stream type {t}"),

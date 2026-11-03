@@ -19,6 +19,10 @@
 - Motion export **as a new variant** of the clip's action: the next free variant number (the wolf's ambient loops
   01–05 → 06), named the way the game composes clip names. The report says what the game makes of a new name: a
   variant, words the game never composes, or a name it does not look up.
+- The terrain export brings the **distant land** along: the 300 m tiles the game shows far away
+  (`G3_World_Landscape_Lowpoly_*`) over moved ground take the edit's height difference, their triangles there split
+  to 8 m (shared across neighbours, so no cracks; uvs, colours and the second uv set from the triangle they lie in).
+  The rest of a tile does not move.
 - Model export: a replaced mesh with further uv sets (Varant's landscape cells) keeps them; before, they were lost.
 
 ## 0.9.10 — 2026-11-02

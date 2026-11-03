@@ -9,7 +9,7 @@
 //!   · u32 size hint · "<material>.xshmat" · u32 streams · per stream: u32 type · u16 1 · u8 1 · u32 count · data
 //!     0 indices u32 · (15 uv f32×2) · 12 uv f32×2 · 5 specular u32 · 4 diffuse u32 · 3 normals f32×3
 //!     · 1 positions f32×3 · (21 uv · 18 uv) · 64 tangents f32×3 (× handedness)
-//!     (the bracketed uv sets only where the mesh has them: Varant's landscape cells)
+//!     · (73 uv) (the bracketed uv sets only where the mesh has them: Varant's landscape cells, the distant land)
 //!   · u8 1 · u32 0 · u8 1 · u32 0 · u8 1 · u32 0   (two index lists and a batch list, empty as in the landscape)
 //!   · u32 nodes · per node: f32 radius · f32 centre[3] · u32 first · u32 count   (a sphere tree in preorder: a leaf
 //!     has count 1, its triangles run from `first` to the next leaf's `first`; an inner node counts its subtree)
@@ -29,7 +29,8 @@ pub struct Part {
     /// Vertex colours (ARGB); empty = white / opaque black.
     pub diffuse: Vec<u32>,
     pub specular: Vec<u32>,
-    /// Further texture coordinate sets by stream (15, 21, 18), one per vertex, as Varant's landscape cells carry them.
+    /// Further texture coordinate sets by stream (15, 21, 18, 73), one per vertex, as Varant's landscape cells and the
+    /// distant land carry them.
     pub extra_uvs: Vec<(u32, Vec<[f32; 2]>)>,
 }
 
@@ -202,7 +203,7 @@ mod tests {
             }).collect();
             let bm = crate::g3_res::decode_xcmsh(&super::write(&parts)).unwrap_or_else(|e| panic!("{k}: {e:#}"));
             let has = |t: u32| m.extra_uvs.iter().any(|e| e.0 == t);
-            let want: Vec<u32> = [(0, true), (15, has(15)), (12, true), (5, true), (4, true), (3, true), (1, true), (21, has(21)), (18, has(18)), (64, true)].into_iter().filter(|x| x.1).map(|x| x.0).collect();
+            let want: Vec<u32> = [(0, true), (15, has(15)), (12, true), (5, true), (4, true), (3, true), (1, true), (21, has(21)), (18, has(18)), (73, has(73)), (64, true)].into_iter().filter(|x| x.1).map(|x| x.0).collect();
             assert_eq!(bm.streams, want, "{k}");
             let cols = |m: &crate::g3_res::G3Mesh| -> Vec<(u32, u32)> { m.geo.indices.iter().map(|&i| (m.diffuse[i as usize], m.specular[i as usize])).collect() };
             assert_eq!(cols(&m), cols(&bm), "{k} colours");

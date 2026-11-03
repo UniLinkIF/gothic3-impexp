@@ -54,6 +54,7 @@ mod geom;
 mod glb;
 mod lightmap;
 mod lipsync;
+mod lowpoly;
 mod staticmesh;
 mod terrain;
 mod textures;
