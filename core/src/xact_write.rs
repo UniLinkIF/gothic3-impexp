@@ -297,7 +297,7 @@ pub struct ActorReport { pub actor: String, pub replaced: bool, pub vertices: us
 
 /// Geometry from the add-on: positions f32×3 per vertex · corner vertex u32 · normals f32×3 and uvs f32×2 per corner
 /// · material u32 per triangle · 8 × (u32 bone, f32 weight) per vertex.
-fn read_input(spec: &ActorSpec) -> Result<SkinInput> {
+pub(crate) fn read_input(spec: &ActorSpec) -> Result<SkinInput> {
     let d = std::fs::read(&spec.geometry).with_context(|| format!("read {}", spec.geometry))?;
     let (v, n) = (spec.vertices, spec.corners);
     let want = v * 12 + n * 4 + n * 12 + n * 8 + n / 3 * 4 + v * 64;
@@ -327,11 +327,27 @@ pub fn build(g: &crate::g3::G3Ctx, spec: &ActorSpec) -> Result<(ActorReport, Vec
     let now = crate::volume::filetime_now();
     let mut files = vec![];
     let mut notes = vec![];
+    let mats = materials(g, &spec.materials, &base.materials, now, &mut files, &mut notes)?;
+    let (bytes, more) = replace_mesh(&template, &input, &mats)?;
+    notes.extend(more);
+    // A name the game's files can carry, as a model's: never a path, Cyrillic transliterated.
+    let name = crate::export::clean(&spec.name);
+    if name.is_empty() { bail!("actor name is empty"); }
+    let base_path = g.path_of(&base_key).unwrap_or(&base_key).to_string();
+    let replaced = name.eq_ignore_ascii_case(&crate::stem_of(&base_path));
+    let path = if replaced { base_path } else { format!("gothic3_impexp/{name}.xact") };
+    files.push(("_compiledAnimation".to_string(), path, bytes));
+    Ok((ActorReport { actor: name, replaced, vertices: input.positions.len(), triangles: input.corner_vertex.len() / 3, materials: mats.iter().map(|m| m.name.clone()).collect(), notes }, files))
+}
+
+/// The materials of an actor: `keep`'s own where a spec names one of them, else new ones (images and a shader material
+/// from a template) into `files`.
+pub(crate) fn materials(g: &crate::g3::G3Ctx, specs: &[crate::export::MatSpec], keep: &[crate::g3_actor::G3Material], now: u64, files: &mut Vec<(String, String, Vec<u8>)>, notes: &mut Vec<String>) -> Result<Vec<NewMaterial>> {
     let mut mats = vec![];
-    for m in &spec.materials {
+    for m in specs {
         let clean = crate::export::clean;
         let name = clean(&m.name);
-        if let Some(own) = base.materials.iter().find(|x| clean(&x.name).eq_ignore_ascii_case(&name)) {
+        if let Some(own) = keep.iter().find(|x| clean(&x.name).eq_ignore_ascii_case(&name)) {
             notes.push(format!("{name}: kept"));
             mats.push(NewMaterial { name: own.name.clone(), diffuse: own.diffuse.clone(), normal: own.normal.clone(), specular: own.specular.clone() });
             continue;
@@ -358,14 +374,5 @@ pub fn build(g: &crate::g3::G3Ctx, spec: &ActorSpec) -> Result<(ActorReport, Vec
         notes.push(format!("{name}: new {mname}"));
         mats.push(NewMaterial { name: mname, diffuse, normal, specular });
     }
-    let (bytes, more) = replace_mesh(&template, &input, &mats)?;
-    notes.extend(more);
-    // A name the game's files can carry, as a model's: never a path, Cyrillic transliterated.
-    let name = crate::export::clean(&spec.name);
-    if name.is_empty() { bail!("actor name is empty"); }
-    let base_path = g.path_of(&base_key).unwrap_or(&base_key).to_string();
-    let replaced = name.eq_ignore_ascii_case(&crate::stem_of(&base_path));
-    let path = if replaced { base_path } else { format!("gothic3_impexp/{name}.xact") };
-    files.push(("_compiledAnimation".to_string(), path, bytes));
-    Ok((ActorReport { actor: name, replaced, vertices: input.positions.len(), triangles: input.corner_vertex.len() / 3, materials: mats.iter().map(|m| m.name.clone()).collect(), notes }, files))
+    Ok(mats)
 }

@@ -34,6 +34,8 @@
 //!                                                           a voice line on an animated head's face bones (glb) + its .ogg
 //! gothic3-core export-lipsync <game> <spec.json> install <mod> | package <folder> <title> | mod <file.g3mod> <name> [author]
 //!                                                           a line's phones as its .xlip, where the game looks for it
+//! gothic3-core export-creature <game> <spec.json> install <mod> | package <folder> <title> | mod <file.g3mod> <name> [author]
+//!                                                           a new creature: its own skeleton, mesh and clips (G3_<Word>_Body_01)
 //! gothic3-core terrain-cells <game>                         the landscape cells: name, land, box over the ground
 //! gothic3-core terrain <game> <cells | @x,z,r> <out dir> [trees]
 //!                                                           landscape cells to edit, with all they carry (.g3terrain);
@@ -45,6 +47,7 @@
 
 mod clip_words;
 mod cook;
+mod creature;
 mod dds;
 mod export;
 mod g3;
@@ -67,8 +70,10 @@ mod terrain;
 mod textures;
 mod volume;
 mod world;
+mod xact_doc;
 mod xact_write;
 mod xcmsh_write;
+mod xmot_doc;
 
 use anyhow::{bail, Context, Result};
 use std::path::Path;
@@ -236,6 +241,15 @@ fn run(args: &[String]) -> Result<serde_json::Value> {
             let (report, file) = lipsync::export(&spec)?;
             let mut out = mods::deliver(Path::new(game), a(4).unwrap_or("install"), a(5).context("mod name, package folder or mod file")?, a(6).unwrap_or(""), a(7).unwrap_or(""), &[file])?;
             out["report"] = report;
+            out
+        }
+        (Some("export-creature"), Some(game)) => {
+            // A new creature: nothing of the game is its template, only its names are checked against the game's.
+            let g = g3::G3Ctx::open_original(Path::new(game))?;
+            let spec: creature::CreatureSpec = serde_json::from_str(&std::fs::read_to_string(a(3).context("spec.json")?)?).context("creature spec")?;
+            let (report, files) = creature::build(&g, &spec)?;
+            let mut out = mods::deliver(Path::new(game), a(4).unwrap_or("install"), a(5).context("mod name, package folder or mod file")?, a(6).unwrap_or(""), a(7).unwrap_or(""), &files)?;
+            out["report"] = serde_json::to_value(report)?;
             out
         }
         (Some("terrain-cells"), Some(game)) => serde_json::to_value(terrain::cells(&open(game)?)?)?,
