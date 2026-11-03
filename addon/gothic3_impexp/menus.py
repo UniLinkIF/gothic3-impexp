@@ -9,6 +9,7 @@ IMPORTS = (
     "gothic3.import_collision",
     "gothic3.import_world",
     "gothic3.import_terrain",
+    "gothic3.import_lipsync",
 )
 
 

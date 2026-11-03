@@ -290,6 +290,25 @@ try:
     core.run = orig
     rep = seen.get("out", {}).get("report", {})
     check(r == {"FINISHED"} and [c.lower() for c in rep.get("changed", [])] == ["g3_varant_landscape_cell_244"], f"painted varant cell: {rep.get('changed')}")
+    # 10. A voice line on an animated head: the head's face bones are on the body's skeleton and move its skin; the
+    #     line comes as an action on those bones only, with its voice in the sequencer.
+    from gothic3_impexp import lipsync
+    clear()
+    r = bpy.ops.gothic3.import_character(name="G3_Hero_Body_Player", with_head=True, head="G3_Head_Hero_Hero_Animated_01")
+    arm = next((o for o in bpy.data.objects if o.type == "ARMATURE"), None)
+    head_ob = next((o for o in bpy.data.objects if o.type == "MESH" and o.get("g3_base", "").lower() == "g3_head_hero_hero_animated_01"), None)
+    check(r == {"FINISHED"} and arm and "Hero_Head_Jaw_B" in arm.data.bones and arm.get("g3_head") == "G3_Head_Hero_Hero_Animated_01" and head_ob and "Hero_Head_Jaw_B" in head_ob.vertex_groups,
+          f"animated head's face bones: {[b.name for b in arm.data.bones if 'Lip' in b.name or 'Jaw' in b.name][:4] if arm else None}")
+    line = next(n for n in core.run("lip-lines", pr.game_dir, "English") if n.startswith("INFO_Ass_Elite_Hard_Bandaro"))
+    bpy.context.view_layer.objects.active = arm
+    arm.select_set(True)
+    r = bpy.ops.gothic3.import_lipsync(line=line, language="English")
+    act = arm.animation_data.action if arm.animation_data else None
+    paths = {fc.data_path.split('"')[1] for fcs in lipsync._fcurves(act) for fc in fcs} if act else set()
+    se = bpy.context.scene.sequence_editor
+    strips = list(se.strips if hasattr(se, "strips") else se.sequences) if se else []
+    check(r == {"FINISHED"} and act and act.get("g3_lipsync") == line and paths and all(("Lip" in p or "Jaw" in p or "Eye" in p or "UpDown" in p) for p in paths) and any(s.type == "SOUND" for s in strips),
+          f"lip-sync: {len(paths)} bones moved ({sorted(paths)[:3]}), strips {[s.type for s in strips]}")
 except Exception:
     traceback.print_exc()
     fails.append("exception")

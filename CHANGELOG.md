@@ -7,6 +7,12 @@
   sets, and the cell of every face (`g3_cell`). The cells come as the game ships them, without any mod.
 - **Export → Gothic 3 Terrain → Mod**: only the cells that changed are written (mesh, collision from their own
   triangles, lightmap); a cell that comes back as it went out is left to the game. Painted colours go along as they are.
+- Characters with an **animated head** (`G3_Head_…_Animated_…`, 28 heads) bring its face bones (lips, jaw, brows: 22)
+  onto the body's skeleton, where they move the face; before, they were all put on the head bone.
+- **Import → Gothic 3 Lip-sync**: a voice line of the game (search by name, per language) on the selected character's
+  animated head, as an action on its face bones only, with the line's voice in the Video Sequencer. Gothic 3's faces
+  move by bones: each animated head has a clip of 15 poses (`<head>_LipSync`), each line a timeline of phones
+  (`.xlip`, in the speech archive), and a phone shows its pose.
 - Motion export **as a new variant** of the clip's action: the next free variant number (the wolf's ambient loops
   01–05 → 06), named the way the game composes clip names. The report says what the game makes of a new name: a
   variant, words the game never composes, or a name it does not look up.
