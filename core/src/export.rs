@@ -6,7 +6,9 @@
 //!   export replaces the shipped mesh again, not our last version.
 //! * A replaced mesh takes its vertex colours from the nearest vertex of the mesh it replaces (same material
 //!   first): the landscape's layer blend and the baked brightness. Every lightmap made for that mesh (one per
-//!   placed instance) is written again for the new vertices the same way.
+//!   placed instance) is written again for the new vertices the same way — but a part that is one of the game's
+//!   elements again (same vertices and triangles, to rounding) goes back in the game's order with its lightmap
+//!   coordinates, and keeps that element's lighting as the game has it, lightmap pages and all.
 //! * A material whose name the game has is used as it is; another one becomes `<name>.xshmat` from a template
 //!   (opaque, opaque with specular, alpha test), its images `<name>_Diffuse_01` / `_Normal_01` / `_Specular_01`.
 //! * Collision, one cooked mesh (part) per surface — or, replacing the game's, the game's parts in the game's order,
@@ -92,11 +94,16 @@ pub struct CollisionSpec {
 #[derive(Deserialize)]
 pub struct ConvexSpec { pub geometry: String, pub corners: usize }
 
+/// A further coordinate set of the model: stream type (15, 18, 21 texture sets 2 to 4, 73 lightmap; see
+/// `g3_res::UV_EXTRA`) and a file of f32×2 per corner, as the game keeps them (V down).
 #[derive(Deserialize)]
-pub struct Spec { pub name: String, pub geometry: String, pub corners: usize, pub materials: Vec<MatSpec>, pub collision: Option<CollisionSpec> }
+pub struct UvSpec { pub stream: u32, pub geometry: String }
+
+#[derive(Deserialize, Default)]
+pub struct Spec { pub name: String, pub geometry: String, pub corners: usize, pub materials: Vec<MatSpec>, pub collision: Option<CollisionSpec>, #[serde(default)] pub uv_extra: Vec<UvSpec> }
 
 #[derive(serde::Serialize, Default)]
-pub struct Report { pub name: String, pub replaced: bool, pub vertices: usize, pub triangles: usize, pub materials: Vec<String>, pub collision: Option<String>, pub convex: Option<String>, pub lightmaps: usize, pub lods: Vec<String>, pub files: Vec<String>, pub warnings: Vec<String> }
+pub struct Report { pub name: String, pub replaced: bool, pub vertices: usize, pub triangles: usize, pub materials: Vec<String>, pub collision: Option<String>, pub convex: Option<String>, pub lightmaps: usize, pub pages_kept: usize, pub lods: Vec<String>, pub files: Vec<String>, pub warnings: Vec<String> }
 
 /// Corner arrays: positions f32×3, normals f32×3, uvs f32×2 (V down), material u32 per triangle.
 fn read_geometry(path: &str, corners: usize) -> Result<(Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>)> {
@@ -264,11 +271,88 @@ fn archive_of(key: &str) -> &'static str {
     match key.split('/').next().unwrap_or("") { "_compiledphysic" => "_compiledPhysic", "lightmaps" => "Lightmaps", _ => "_compiledMesh" }
 }
 
-/// Lightmaps of `orig` (at archive path `tpath`) written again for `near` (new vertex → original vertex).
-fn lightmaps(g: &G3Ctx, orig: &crate::g3_res::G3Mesh, tpath: &str, near: &[Vec<u32>], r: &mut Report, files: &mut Vec<(String, String, Vec<u8>)>) -> Result<()> {
+/// Part `p` in the shape of element `e` of `orig` when it is that element again: every vertex of either at a vertex
+/// of the other (within 0.05 cm, the same uv to 1e-3) and the same triangles. Then it takes the element's own vertex
+/// and triangle order and its lightmap coordinates (and texture sets the part lacks), so the game's lightmap pages of
+/// that element, made for exactly those, stay right.
+fn as_element(orig: &crate::g3_res::G3Mesh, e: usize, p: &crate::xcmsh_write::Part) -> Option<crate::xcmsh_write::Part> {
+    let (first, n) = *orig.elements.get(e)?;
+    let (first, n) = (first as usize, n as usize);
+    let s = &orig.geo.submeshes[e];
+    let tris: Vec<[u32; 3]> = orig.geo.indices[s.first_index as usize..(s.first_index + s.index_count) as usize].chunks_exact(3).map(|c| [c[0], c[1], c[2]].map(|i| i - first as u32)).collect();
+    if n == 0 || tris.len() != p.triangles.len() || n < p.positions.len() { return None; }
+    let has_uv = orig.geo.uvs.len() == orig.geo.positions.len() && p.uvs.len() == p.positions.len();
+    let has_n = p.normals.len() == p.positions.len();
+    // Vertices of the part that are one vertex but for rounding (Blender's corner normals of one vertex differ in the
+    // last digits) count as one: the first stands for the others.
+    let cell = |q: [f32; 3]| q.map(|x| x.floor() as i32);
+    let near = |a: &[f32], b: &[f32], tol: f32| a.iter().zip(b).all(|(x, y)| (x - y).abs() <= tol);
+    let twins = |j: usize, k: usize| near(&p.positions[j], &p.positions[k], 0.05) && (!has_uv || near(&p.uvs[j], &p.uvs[k], 1e-3))
+        && (!has_n || near(&p.normals[j], &p.normals[k], 0.02)) && p.extra.iter().all(|(_, v)| v.len() != p.positions.len() || near(&v[j], &v[k], 1e-3));
+    let mut grid: HashMap<[i32; 3], Vec<u32>> = HashMap::new();
+    let mut canon: Vec<u32> = Vec::with_capacity(p.positions.len());
+    for j in 0..p.positions.len() {
+        let c = cell(p.positions[j]);
+        let found = (0..27).find_map(|nb| grid.get(&[c[0] + nb % 3 - 1, c[1] + nb / 3 % 3 - 1, c[2] + nb / 9 - 1])?.iter().copied().find(|&k| twins(j, k as usize)));
+        canon.push(found.unwrap_or_else(|| { grid.entry(c).or_default().push(j as u32); j as u32 }));
+    }
+    let mut map = Vec::with_capacity(n);
+    for i in first..first + n {
+        let q = orig.geo.positions[i];
+        let c = cell(q);
+        let mut best: Option<(f32, u32)> = None;
+        for dx in -1..=1 { for dy in -1..=1 { for dz in -1..=1 {
+            for &j in grid.get(&[c[0] + dx, c[1] + dy, c[2] + dz]).into_iter().flatten() {
+                let d: f32 = (0..3).map(|k| (p.positions[j as usize][k] - q[k]).powi(2)).sum();
+                let uv_ok = !has_uv || (0..2).all(|k| (p.uvs[j as usize][k] - orig.geo.uvs[i][k]).abs() <= 1e-3);
+                if d > 0.05 * 0.05 || !uv_ok { continue; }
+                // Twins at one place (seams) told apart by their normal, uv and further coordinates.
+                let nd: f32 = if p.normals.len() == p.positions.len() && orig.geo.normals.len() == orig.geo.positions.len() { (0..3).map(|k| (p.normals[j as usize][k] - orig.geo.normals[i][k]).powi(2)).sum() } else { 0.0 };
+                let xd: f32 = p.extra.iter().filter_map(|(t, v)| Some((v.get(j as usize)?, orig.uv_extra.iter().find(|x| x.0 == *t)?.1.get(i)?))).map(|(a, b)| (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sum();
+                let ud: f32 = if has_uv { (0..2).map(|k| (p.uvs[j as usize][k] - orig.geo.uvs[i][k]).powi(2)).sum() } else { 0.0 };
+                let score = d + nd + xd + ud;
+                if best.map_or(true, |b| score < b.0) { best = Some((score, j)); }
+            }
+        } } }
+        map.push(best?.1);
+    }
+    let mut used: Vec<bool> = canon.iter().enumerate().map(|(j, &c)| c != j as u32).collect();
+    for &j in &map { used[j as usize] = true; }
+    if used.contains(&false) { return None; }
+    // The same triangles, each turning the same way.
+    let norm = |t: [u32; 3]| { let r = (0..3).min_by_key(|&k| t[k]).unwrap(); [t[r], t[(r + 1) % 3], t[(r + 2) % 3]] };
+    let mut a: Vec<[u32; 3]> = tris.iter().map(|t| norm(t.map(|i| map[i as usize]))).collect();
+    let mut b: Vec<[u32; 3]> = p.triangles.iter().map(|&t| norm(t.map(|j| canon[j as usize]))).collect();
+    a.sort(); b.sort();
+    if a != b { return None; }
+    let pick = |v: &[[f32; 3]]| map.iter().map(|&j| v[j as usize]).collect::<Vec<_>>();
+    let mut extra = vec![];
+    for &ty in &crate::g3_res::UV_EXTRA {
+        let game = orig.element_streams[e].contains(&ty).then(|| orig.uv_extra.iter().find(|x| x.0 == ty)).flatten().map(|(_, v)| v[first..first + n].to_vec());
+        let ours = p.extra.iter().find(|x| x.0 == ty && x.1.len() == p.positions.len()).map(|(_, v)| map.iter().map(|&j| v[j as usize]).collect::<Vec<_>>());
+        // The lightmap's coordinates are the game's exactly; a texture set the part has is its own.
+        if let Some(v) = if ty == 73 { game.or(ours) } else { ours.or(game) } { extra.push((ty, v)); }
+    }
+    Some(crate::xcmsh_write::Part {
+        material: p.material.clone(),
+        positions: pick(&p.positions),
+        normals: pick(&p.normals),
+        uvs: if p.uvs.len() == p.positions.len() { map.iter().map(|&j| p.uvs[j as usize]).collect() } else { vec![] },
+        triangles: tris,
+        diffuse: orig.diffuse[first..first + n].to_vec(),
+        specular: orig.specular[first..first + n].to_vec(),
+        extra,
+    })
+}
+
+/// Lightmaps of `orig` (at archive path `tpath`) written again for `near` (new vertex → original vertex). A part that
+/// is an element of the original again (`kept`) keeps that element's lighting as it is, pages and all; the others are
+/// lit per vertex from the nearest original vertex.
+fn lightmaps(g: &G3Ctx, orig: &crate::g3_res::G3Mesh, tpath: &str, near: &[Vec<u32>], kept: &[Option<usize>], r: &mut Report, files: &mut Vec<(String, String, Vec<u8>)>) -> Result<()> {
     let stem = tpath.rsplit('/').next().unwrap().trim_end_matches(".xcmsh").to_lowercase();
     let want = format!("/data/_compiledmesh/{}", tpath.to_lowercase());
     let pre = format!("lightmaps/{stem}_{{");
+    let mut paged = vec![];
     for lk in g.keys().into_iter().filter(|k| k.starts_with(&pre)) {
         let d = g.read(&lk)?;
         if crate::lightmap::mesh_path(&d).as_deref() != Some(want.as_str()) { continue; }
@@ -281,14 +365,27 @@ fn lightmaps(g: &G3Ctx, orig: &crate::g3_res::G3Mesh, tpath: &str, near: &[Vec<u
             for i in 0..n as usize { light[first as usize + i] = Some((cols[i], dirs[i])); }
         }
         let any = light.iter().flatten().next().copied();
-        let elements: Vec<(Vec<u32>, Vec<[f32; 3]>)> = near.iter().map(|n| {
+        let (mut elements, mut pages) = (vec![], vec![]);
+        let mut lost = 0;
+        for (i, n) in near.iter().enumerate() {
+            if let Some(e) = kept.get(i).copied().flatten().filter(|&e| lm.elements.get(e).is_some_and(|x| x.0.len() == n.len())) {
+                elements.push(lm.elements[e].clone());
+                pages.push(lm.pages[e].clone());
+                r.pages_kept += lm.has_pages(e) as usize;
+                continue;
+            }
             let v: Vec<(u32, [f32; 3])> = n.iter().map(|&i| light[i as usize].or(any).unwrap_or((0xff80_8080, [0.0, 1.0, 0.0]))).collect();
-            (v.iter().map(|x| x.0).collect(), v.iter().map(|x| x.1).collect())
-        }).collect();
+            elements.push((v.iter().map(|x| x.0).collect(), v.iter().map(|x| x.1).collect()));
+            pages.push(crate::lightmap::NONE.to_vec());
+        }
+        for e in 0..lm.count { if lm.has_pages(e) && !kept.contains(&Some(e)) { lost += 1; } }
         let path = g.path_of(&lk).unwrap_or(&lk).to_string();
-        if lm.elements.len() < lm.count { r.warnings.push(format!("{path}: lit by lightmap pages in the game; written as vertex lighting from what could be read")); }
-        files.push(("Lightmaps".to_string(), path, crate::lightmap::write(&lm, &elements)));
+        if lost > 0 { paged.push(path.clone()); }
+        files.push(("Lightmaps".to_string(), path, crate::lightmap::write(&lm, &elements, &pages)));
         r.lightmaps += 1;
+    }
+    if let Some(first) = paged.first() {
+        r.warnings.push(format!("{tpath}: {} of its placements light changed parts by lightmap pages in the game (e.g. {first}); those parts are lit per vertex now", paged.len()));
     }
     Ok(())
 }
@@ -323,15 +420,31 @@ pub fn build(g: &G3Ctx, spec: &Spec) -> Result<(Report, Vec<(String, String, Vec
 
     // Parts per material: one vertex per (position, normal, uv). Parts without triangles are left out, so the
     // lightmaps count the same elements as the mesh.
-    let mut parts: Vec<crate::xcmsh_write::Part> = mat_names.iter().map(|m| crate::xcmsh_write::Part { material: m.clone(), positions: vec![], normals: vec![], uvs: vec![], triangles: vec![], diffuse: vec![], specular: vec![] }).collect();
-    let mut seen: Vec<HashMap<[u32; 8], u32>> = vec![HashMap::new(); parts.len()];
+    // Further coordinate sets (Blender's G3_UV2… and G3_Lightmap layers), per corner.
+    let mut extra_in: Vec<(u32, Vec<[f32; 2]>)> = vec![];
+    for u in &spec.uv_extra {
+        if !crate::g3_res::UV_EXTRA.contains(&u.stream) { bail!("coordinate stream {} is not one of {:?}", u.stream, crate::g3_res::UV_EXTRA); }
+        let d = std::fs::read(&u.geometry).with_context(|| format!("read {}", u.geometry))?;
+        if d.len() != spec.corners * 8 { bail!("coordinate set {}: {} bytes for {} corners", u.stream, d.len(), spec.corners); }
+        let f = |i: usize| f32::from_le_bytes(d[i * 4..i * 4 + 4].try_into().unwrap());
+        extra_in.push((u.stream, (0..spec.corners).map(|c| [f(c * 2), f(c * 2 + 1)]).collect()));
+    }
+    extra_in.sort_by_key(|x| x.0);
+    extra_in.dedup_by_key(|x| x.0);
+    let mut parts: Vec<crate::xcmsh_write::Part> = mat_names.iter().map(|m| crate::xcmsh_write::Part { material: m.clone(), positions: vec![], normals: vec![], uvs: vec![], triangles: vec![], diffuse: vec![], specular: vec![], extra: extra_in.iter().map(|(t, _)| (*t, vec![])).collect() }).collect();
+    let mut seen: Vec<HashMap<Vec<u32>, u32>> = vec![HashMap::new(); parts.len()];
     for t in 0..spec.corners / 3 {
         let mi = (tri_mat[t] as usize).min(parts.len() - 1);
         let p = &mut parts[mi];
         let tri = [0, 1, 2].map(|k| {
             let c = t * 3 + k;
-            let key = [pos[c][0].to_bits(), pos[c][1].to_bits(), pos[c][2].to_bits(), nrm[c][0].to_bits(), nrm[c][1].to_bits(), nrm[c][2].to_bits(), uv[c][0].to_bits(), uv[c][1].to_bits()];
-            *seen[mi].entry(key).or_insert_with(|| { p.positions.push(pos[c]); p.normals.push(nrm[c]); p.uvs.push(uv[c]); p.positions.len() as u32 - 1 })
+            let mut key = vec![pos[c][0].to_bits(), pos[c][1].to_bits(), pos[c][2].to_bits(), nrm[c][0].to_bits(), nrm[c][1].to_bits(), nrm[c][2].to_bits(), uv[c][0].to_bits(), uv[c][1].to_bits()];
+            for (_, v) in &extra_in { key.extend(v[c].map(f32::to_bits)); }
+            *seen[mi].entry(key).or_insert_with(|| {
+                p.positions.push(pos[c]); p.normals.push(nrm[c]); p.uvs.push(uv[c]);
+                for (k, (_, v)) in extra_in.iter().enumerate() { p.extra[k].1.push(v[c]); }
+                p.positions.len() as u32 - 1
+            })
         });
         p.triangles.push(tri);
     }
@@ -353,15 +466,22 @@ pub fn build(g: &G3Ctx, spec: &Spec) -> Result<(Report, Vec<(String, String, Vec
         }
     }
     for (key, tpath) in &targets {
-        let mut tparts: Vec<crate::xcmsh_write::Part> = parts.iter().map(|p| crate::xcmsh_write::Part { material: p.material.clone(), positions: p.positions.clone(), normals: p.normals.clone(), uvs: p.uvs.clone(), triangles: p.triangles.clone(), diffuse: vec![], specular: vec![] }).collect();
+        let mut tparts: Vec<crate::xcmsh_write::Part> = parts.iter().map(|p| crate::xcmsh_write::Part { material: p.material.clone(), positions: p.positions.clone(), normals: p.normals.clone(), uvs: p.uvs.clone(), triangles: p.triangles.clone(), diffuse: vec![], specular: vec![], extra: p.extra.clone() }).collect();
         let orig = match key { Some(k) => Some(crate::g3_res::decode_xcmsh(&g.read(k)?).with_context(|| format!("{k}: the mesh it replaces"))?), None => None };
         if let Some(o) = &orig {
-            let near = nearest_original(o, &tparts);
-            for (p, n) in tparts.iter_mut().zip(&near) {
+            // Parts that are elements of the original again take its order, so its lightmap pages stay theirs.
+            let mut kept: Vec<Option<usize>> = vec![None; tparts.len()];
+            for (i, p) in tparts.iter_mut().enumerate() {
+                let found = std::iter::once(i).chain(0..o.elements.len()).filter(|e| !kept.contains(&Some(*e))).find_map(|e| as_element(o, e, p).map(|x| (e, x)));
+                if let Some((e, same)) = found { *p = same; kept[i] = Some(e); }
+            }
+            let mut near = nearest_original(o, &tparts);
+            for (i, (p, n)) in tparts.iter_mut().zip(near.iter_mut()).enumerate() {
+                if let Some(e) = kept[i] { let first = o.elements[e].0; *n = (first..first + p.positions.len() as u32).collect(); continue; }
                 p.diffuse = n.iter().map(|&i| o.diffuse[i as usize]).collect();
                 p.specular = n.iter().map(|&i| o.specular[i as usize]).collect();
             }
-            lightmaps(g, o, tpath, &near, &mut r, &mut files)?;
+            lightmaps(g, o, tpath, &near, &kept, &mut r, &mut files)?;
         }
         files.push(("_compiledMesh".to_string(), tpath.clone(), crate::xcmsh_write::write(&tparts)));
     }
@@ -550,9 +670,11 @@ mod tests {
         let m = crate::g3_res::decode_xcmsh(&g.read(key).unwrap()).unwrap();
         let geo = &m.geo;
         let (mut p, mut n, mut u, mut t) = (vec![], vec![], vec![], vec![]);
+        let mut x: Vec<Vec<u8>> = vec![vec![]; m.uv_extra.len()];
         for (e, s) in geo.submeshes.iter().enumerate() {
             for tri in geo.indices[s.first_index as usize..(s.first_index + s.index_count) as usize].chunks_exact(3) {
                 for &i in tri { p.extend(geo.positions[i as usize]); n.extend(geo.normals[i as usize]); u.extend(geo.uvs.get(i as usize).copied().unwrap_or([0.0; 2])); }
+                for (k, (_, v)) in m.uv_extra.iter().enumerate() { for &i in tri { for c in v[i as usize] { x[k].extend(c.to_le_bytes()); } } }
                 t.push(e as u32);
             }
         }
@@ -563,8 +685,9 @@ mod tests {
         let geof = dir.join("geometry.bin");
         std::fs::write(&geof, bytes).unwrap();
         let mats = || geo.submeshes.iter().map(|s| MatSpec { name: s.material.trim_end_matches(".xshmat").to_string(), ..Default::default() }).collect();
+        let uv_extra = m.uv_extra.iter().zip(&x).map(|((ty, _), b)| { let f = dir.join(format!("uv{ty}.bin")); std::fs::write(&f, b).unwrap(); UvSpec { stream: *ty, geometry: f.to_string_lossy().into_owned() } }).collect();
         Spec { name: crate::stem_of(key), geometry: geof.to_string_lossy().into_owned(), corners: t.len() * 3, materials: mats(),
-            collision: Some(CollisionSpec { geometry: None, corners: None, material: Some("stone".into()), mode: Some(collision.into()), materials: vec![], convex: vec![] }) }
+            collision: Some(CollisionSpec { geometry: None, corners: None, material: Some("stone".into()), mode: Some(collision.into()), materials: vec![], convex: vec![] }), uv_extra }
     }
 
     /// The landscape cell written back from its own triangles: same colours, its one lightmap rebuilt to the
@@ -646,6 +769,74 @@ mod tests {
         assert!(r.warnings.iter().any(|w| w.contains("debris")), "{:?}", r.warnings);
     }
 
+    /// A building lit by lightmap pages, written back from its own triangles (as the add-on sends them, in Blender's
+    /// order): its elements take the game's vertex and triangle order again, and every lightmap of it comes out as the
+    /// game's, byte for byte, pages and all. With one vertex moved, that element is lit per vertex, the others keep
+    /// their pages.
+    #[test]
+    fn a_building_replaced_by_itself_keeps_its_lightmap_pages() {
+        let Ok(root) = std::env::var("G3_GAME") else { return };
+        let g = G3Ctx::open_original(Path::new(&root)).unwrap();
+        let key = crate::staticmesh::mesh_key(&g, "G3_Architecture_Arena_Manege_01").unwrap();
+        let dir = std::env::temp_dir().join(format!("g3ie_test_pages_{}", std::process::id()));
+        let spec = spec_of(&g, &key, &dir, "none");
+        let (r, files) = build(&g, &spec).unwrap();
+        let game = crate::g3_res::decode_xcmsh(&g.read(&key).unwrap()).unwrap();
+        let ours = crate::g3_res::decode_xcmsh(&files.iter().find(|f| f.1.eq_ignore_ascii_case(g.path_of(&key).unwrap())).unwrap().2).unwrap();
+        assert_eq!(ours.elements, game.elements);
+        assert_eq!(ours.geo.indices, game.geo.indices);
+        let lm73 = |m: &crate::g3_res::G3Mesh| m.uv_extra.iter().find(|x| x.0 == 73).map(|x| x.1.clone());
+        assert!(lm73(&game).is_some() && lm73(&ours) == lm73(&game));
+        let lights: Vec<&(String, String, Vec<u8>)> = files.iter().filter(|f| f.0 == "Lightmaps").collect();
+        let paged = lights.iter().filter(|f| { let l = crate::lightmap::parse(&f.2).unwrap(); (0..l.count).any(|e| l.has_pages(e)) }).count();
+        assert!(!lights.is_empty() && paged > 0 && r.pages_kept >= paged, "{} lightmaps, {paged} with pages, {} pages kept", lights.len(), r.pages_kept);
+        for f in &lights {
+            let k = g.keys().into_iter().find(|k| k.eq_ignore_ascii_case(&format!("lightmaps/{}", f.1))).unwrap();
+            assert!(f.2 == g.read(&k).unwrap(), "{}: not the game's", f.1);
+        }
+        // One vertex of the first element moved by 10 cm.
+        let mut geo = std::fs::read(&spec.geometry).unwrap();
+        let at = |c: usize, k: usize| c * 12 + k * 4;
+        let first: [u8; 12] = geo[0..12].try_into().unwrap();
+        for c in 0..spec.corners { if geo[at(c, 0)..at(c, 0) + 12] == first { let y = f32::from_le_bytes(geo[at(c, 1)..at(c, 1) + 4].try_into().unwrap()) + 10.0; geo[at(c, 1)..at(c, 1) + 4].copy_from_slice(&y.to_le_bytes()); } }
+        std::fs::write(&spec.geometry, geo).unwrap();
+        let (r2, files2) = build(&g, &spec).unwrap();
+        let l = crate::lightmap::parse(&files2.iter().find(|f| f.0 == "Lightmaps" && { let x = crate::lightmap::parse(&f.2).unwrap(); x.count > 1 }).unwrap().2).unwrap();
+        assert!(!l.has_pages(0), "the moved element is lit per vertex");
+        assert!(r2.pages_kept < r.pages_kept && r2.warnings.iter().any(|w| w.contains("lit per vertex")), "{} {:?}", r2.pages_kept, r2.warnings);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Across the game: meshes lit by lightmap pages somewhere in the world, each written back from its own triangles,
+    /// keep the pages of nearly every element (199 of 204 in this sample of 24; the others are lit per vertex).
+    #[test]
+    fn paged_meshes_replaced_by_themselves_keep_their_pages() {
+        let Ok(root) = std::env::var("G3_GAME") else { return };
+        let g = G3Ctx::open_original(Path::new(&root)).unwrap();
+        let mut meshes = std::collections::BTreeSet::new();
+        for k in g.keys().into_iter().filter(|k| k.ends_with(".xlmp")) {
+            let d = g.read(&k).unwrap();
+            let l = crate::lightmap::parse(&d).unwrap();
+            if (0..l.count).any(|e| l.has_pages(e)) { if let Some(m) = crate::lightmap::mesh_path(&d) { meshes.insert(m.rsplit('/').next().unwrap().trim_end_matches(".xcmsh").to_string()); } }
+        }
+        let (mut paged, mut kept, mut n) = (0, 0, 0);
+        for m in meshes.iter().step_by(meshes.len() / 24 + 1) {
+            let Some(key) = crate::staticmesh::mesh_key(&g, m) else { continue };
+            let spec = spec_of(&g, &key, &std::env::temp_dir().join(format!("g3ie_test_paged_{}", std::process::id())), "none");
+            let (r, files) = build(&g, &spec).unwrap();
+            let path = g.path_of(&key).unwrap().to_lowercase();
+            for f in files.iter().filter(|f| f.0 == "Lightmaps") {
+                let game = crate::lightmap::parse(&g.read(&format!("lightmaps/{}", f.1.to_lowercase())).unwrap()).unwrap();
+                if crate::lightmap::mesh_path(&f.2).is_some_and(|p| p.ends_with(&path)) { paged += (0..game.count).filter(|&e| game.has_pages(e)).count(); }
+            }
+            kept += r.pages_kept;
+            n += 1;
+        }
+        std::fs::remove_dir_all(std::env::temp_dir().join(format!("g3ie_test_paged_{}", std::process::id()))).ok();
+        eprintln!("{n} meshes: {kept} of {paged} paged elements keep their pages");
+        assert!(n >= 20 && kept * 100 >= paged * 95, "{n} meshes: {kept} of {paged} paged elements keep their pages");
+    }
+
     /// A new model's materials take the template of their look, with our pictures and a flat normal where the Blender
     /// material has none; an actor's take the skinned ones.
     #[test]
@@ -666,7 +857,7 @@ mod tests {
         for t in 0..n as u32 { b.extend(t.to_le_bytes()); }
         let geo = dir.join("geometry.bin");
         std::fs::write(&geo, b).unwrap();
-        let spec = Spec { name: "G3IE_Test_Lamp_Stand".into(), geometry: geo.to_string_lossy().into_owned(), corners: n * 3, materials: mats, collision: None };
+        let spec = Spec { name: "G3IE_Test_Lamp_Stand".into(), geometry: geo.to_string_lossy().into_owned(), corners: n * 3, materials: mats, ..Default::default() };
         let (r, files) = build(&g, &spec).unwrap();
         let read = |stem: &str| { let f = files.iter().find(|f| f.1.ends_with(".xshmat") && f.1.contains(stem)).unwrap_or_else(|| panic!("{stem}: {:?}", r.files)); crate::g3_res::parse_xshmat(&f.2).unwrap() };
         assert_eq!(read("Plank").blend, Some(0));

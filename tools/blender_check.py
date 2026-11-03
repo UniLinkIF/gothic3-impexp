@@ -232,6 +232,29 @@ try:
     want = ["(opaque)", "(alpha test)", "(blend)", "(glow)"]
     check(r == {"FINISHED"} and len(mats) == 4 and all(any(m.endswith(w) for m in mats) for w in want), f"looks exported: {mats}")
 
+    # 10. A building lit by lightmap pages: its lightmap coordinates come in as a UV layer, a wall's second texture set as
+    #     another; exported back unchanged, every part keeps the game's pages.
+    clear()
+    bpy.ops.gothic3.import_mesh(name="G3_Myrtana_Trelis_Channel_Wall_01", with_collision=False)
+    wall = bpy.data.objects.get("G3_Myrtana_Trelis_Channel_Wall_01")
+    check(wall is not None and wall.data.uv_layers.get("G3_UV2") is not None and wall.data.uv_layers.active.name == "UVMap", f"second texture set: {[l.name for l in wall.data.uv_layers] if wall else None}")
+    clear()
+    bpy.ops.gothic3.import_mesh(name="G3_Architecture_Arena_Manege_01", with_collision=False)
+    arena = bpy.data.objects.get("G3_Architecture_Arena_Manege_01")
+    layers = [l.name for l in arena.data.uv_layers] if arena else []
+    check("G3_Lightmap" in layers, f"lightmap coordinates: {layers}")
+    bpy.ops.object.select_all(action="DESELECT")
+    arena.select_set(True)
+    bpy.context.view_layer.objects.active = arena
+    seen.clear()
+    core.run = spy
+    r = bpy.ops.gothic3.export_mesh(name="G3_Architecture_Arena_Manege_01", mode="package", folder=os.path.join(OUT, "arena_pkg"), title="Arena (test)", collision="none")
+    core.run = orig
+    rep = seen.get("out", {}).get("report", {})
+    streams = sorted(u["stream"] for u in seen.get("spec", {}).get("uv_extra", []))
+    check(r == {"FINISHED"} and streams == [73] and rep.get("pages_kept", 0) > 0 and not any("per vertex" in w for w in rep.get("warnings", [])),
+          f"pages kept: {rep.get('pages_kept')} over {rep.get('lightmaps')} lightmaps, streams {streams}, warnings {rep.get('warnings')}")
+
 except Exception:
     traceback.print_exc()
     fails.append("exception")

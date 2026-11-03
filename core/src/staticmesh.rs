@@ -4,6 +4,13 @@
 //! up Y and scale 0.01, so Blender gets metres in its own axes. Positions are welded (one OBJ vertex per position);
 //! every corner keeps its own uv and normal, so seams stay. Triangle order is taken as stored, unless most
 //! triangles face away from their own normals, in which case all are turned.
+//!
+//! The further coordinate sets (texture sets 2 to 4, the lightmap's; see `g3_res::UV_EXTRA`) go beside it as
+//! `<stem>.uvx`, as the game keeps them, for the add-on to put on as UV layers:
+//! ```text
+//! "G3UVX1" · u32 sets · u32 stream type per set · u32 faces · per face (OBJ order): u8 1 when it has vertices of its
+//!   own (see below) · per set, per corner: f32 u, f32 v
+//! ```
 
 use crate::g3::G3Ctx;
 use anyhow::{Context, Result};
@@ -15,7 +22,7 @@ use std::path::Path;
 pub struct Material { pub name: String, pub diffuse: Option<String>, pub normal: Option<String>, pub specular: Option<String>, pub blend: u32, pub mask: u8 }
 
 #[derive(serde::Serialize)]
-pub struct MeshOut { pub entry: String, pub obj: String, pub vertices: usize, pub triangles: usize, pub materials: Vec<Material>, pub warnings: Vec<String> }
+pub struct MeshOut { pub entry: String, pub obj: String, pub vertices: usize, pub triangles: usize, pub materials: Vec<Material>, pub warnings: Vec<String>, pub uvx: Option<String> }
 
 pub fn mesh_key(g: &G3Ctx, name: &str) -> Option<String> {
     let n = name.trim_end_matches(".xcmsh");
@@ -62,7 +69,8 @@ pub fn needs_turn(pos: &[[f32; 3]], nrm: &[[f32; 3]], tris: impl Iterator<Item =
 pub fn export_obj(g: &G3Ctx, name: &str, out_dir: &Path) -> Result<MeshOut> {
     let key = mesh_key(g, name).with_context(|| format!("{name}: no such mesh in Gothic 3"))?;
     let stem = key.rsplit('/').next().unwrap().trim_end_matches(".xcmsh").to_string();
-    let geo = crate::g3_res::decode_xcmsh(&g.read(&key)?).with_context(|| format!("decode {key}"))?.geo;
+    let mesh = crate::g3_res::decode_xcmsh(&g.read(&key)?).with_context(|| format!("decode {key}"))?;
+    let (geo, m_extra) = (&mesh.geo, &mesh.uv_extra);
     std::fs::create_dir_all(out_dir)?;
     let mut warnings = vec![];
     let materials: Vec<Material> = geo.submeshes.iter().map(|s| material(g, &s.material, out_dir, &mut warnings)).collect();
@@ -78,19 +86,39 @@ pub fn export_obj(g: &G3Ctx, name: &str, out_dir: &Path) -> Result<MeshOut> {
         let i = *weld.entry(p.map(f32::to_bits)).or_insert_with(|| { let _ = writeln!(obj, "v {} {} {}", p[0], p[1], -p[2]); n });
         vid.push(i + 1);
     }
+    // Blender's importer drops a face whose corners share a vertex, and a second face on the same three vertices (the
+    // game's double-sided parts): those get vertices of their own, so every triangle comes in and goes back out.
+    let order = |c: &[u32]| if turn { [c[0], c[2], c[1]] } else { [c[0], c[1], c[2]] };
+    let mut faces_on: std::collections::HashSet<[usize; 3]> = std::collections::HashSet::new();
+    let mut own: Vec<Option<[usize; 3]>> = vec![];
+    let mut next = weld.len();
+    for c in geo.indices.chunks_exact(3) {
+        let f = order(c);
+        let mut v = f.map(|i| vid[i as usize]);
+        v.sort();
+        if v[0] != v[1] && v[1] != v[2] && faces_on.insert(v) { own.push(None); continue; }
+        own.push(Some(f.map(|i| { let p = geo.positions[i as usize]; let _ = writeln!(obj, "v {} {} {}", p[0], p[1], -p[2]); next += 1; next })));
+    }
     if has_uv { for t in &geo.uvs { let _ = writeln!(obj, "vt {} {}", t[0], 1.0 - t[1]); } }
     if has_n { for n in &geo.normals { let _ = writeln!(obj, "vn {} {} {}", n[0], n[1], -n[2]); } }
-    let corner = |i: u32| -> String {
-        let (v, k) = (vid[i as usize], i as usize + 1);
+    let corner = |i: u32, own: Option<usize>| -> String {
+        let (v, k) = (own.unwrap_or(vid[i as usize]), i as usize + 1);
         match (has_uv, has_n) { (true, true) => format!("{v}/{k}/{k}"), (true, false) => format!("{v}/{k}"), (false, true) => format!("{v}//{k}"), _ => format!("{v}") }
     };
     let mut tris = 0;
+    // The further coordinate sets, per face corner as the faces go (Blender has no place for them in an OBJ).
+    let mut uvx = vec![];
     for (s, m) in geo.submeshes.iter().zip(&materials) {
         let _ = writeln!(obj, "usemtl {}", m.name);
         let idx = &geo.indices[s.first_index as usize..(s.first_index + s.index_count) as usize];
         for c in idx.chunks_exact(3) {
-            let (a, b, d) = if turn { (c[0], c[2], c[1]) } else { (c[0], c[1], c[2]) };
-            let _ = writeln!(obj, "f {} {} {}", corner(a), corner(b), corner(d));
+            let [a, b, d] = order(c);
+            let o = own[tris];
+            let _ = writeln!(obj, "f {} {} {}", corner(a, o.map(|x| x[0])), corner(b, o.map(|x| x[1])), corner(d, o.map(|x| x[2])));
+            if !m_extra.is_empty() {
+                uvx.push(o.is_some() as u8);
+                for (_, v) in m_extra { for i in [a, b, d] { for x in v[i as usize] { uvx.extend(x.to_le_bytes()); } } }
+            }
             tris += 1;
         }
     }
@@ -103,7 +131,17 @@ pub fn export_obj(g: &G3Ctx, name: &str, out_dir: &Path) -> Result<MeshOut> {
     let obj_path = out_dir.join(format!("{stem}.obj"));
     std::fs::write(&obj_path, obj)?;
     std::fs::write(out_dir.join(format!("{stem}.mtl")), mtl)?;
-    Ok(MeshOut { entry: key, obj: obj_path.to_string_lossy().into_owned(), vertices: weld.len(), triangles: tris, materials, warnings })
+    let uvx_path = out_dir.join(format!("{stem}.uvx"));
+    let uvx = if m_extra.is_empty() { let _ = std::fs::remove_file(&uvx_path); None } else {
+        let mut b = b"G3UVX1".to_vec();
+        b.extend((m_extra.len() as u32).to_le_bytes());
+        for (t, _) in m_extra { b.extend(t.to_le_bytes()); }
+        b.extend((tris as u32).to_le_bytes());
+        b.extend(uvx);
+        std::fs::write(&uvx_path, b)?;
+        Some(uvx_path.to_string_lossy().into_owned())
+    };
+    Ok(MeshOut { entry: key, obj: obj_path.to_string_lossy().into_owned(), vertices: weld.len(), triangles: tris, materials, warnings, uvx })
 }
 
 /// `name` without `.xcmsh` and a `_COL` / `_CV` ending (any case).

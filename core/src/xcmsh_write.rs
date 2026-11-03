@@ -8,6 +8,7 @@
 //!   u16 5 · u32 FVF (0x1d2: position, normal, diffuse, specular, uv) · f32 min[3] max[3] · u32 size hint
 //!   · "<material>.xshmat" · u32 streams · per stream: u32 type · u16 1 · u8 1 · u32 count · data
 //!     0 indices u32 · 12 uv f32×2 · 5 specular u32 · 4 diffuse u32 · 3 normals f32×3 · 1 positions f32×3
+//!     · 15 / 18 / 21 texture sets 2 to 4, f32×2 (FVF + 0x100 each) · 73 lightmap coordinates f32×2
 //!     · 64 tangents f32×3 (× handedness)
 //!   · u8 1 · u32 0 · u8 1 · u32 0 · u8 1 · u32 0   (two index lists and a batch list, empty as in the landscape)
 //!   · u32 nodes · per node: f32 radius · f32 centre[3] · u32 first · u32 count   (a sphere tree in preorder: a leaf
@@ -28,6 +29,8 @@ pub struct Part {
     /// Vertex colours (ARGB); empty = white / opaque black.
     pub diffuse: Vec<u32>,
     pub specular: Vec<u32>,
+    /// Further coordinates per vertex by stream type (`g3_res::UV_EXTRA`: 15, 18, 21 texture sets 2 to 4, 73 lightmap).
+    pub extra: Vec<(u32, Vec<[f32; 2]>)>,
 }
 
 /// Default colours of a vertex nothing is known about: white, fully lit.
@@ -133,9 +136,14 @@ pub fn write(parts: &[Part]) -> Vec<u8> {
         let spe: Vec<u32> = if p.specular.len() == nv { p.specular.clone() } else { vec![LIT; nv] };
         let tan = tangents(&p.positions, &p.normals, &uv, &p.triangles);
         let (nodes, order) = sphere_tree(&p.positions, &p.triangles);
-        let streams = 7u32;
+        // The further texture sets the part has (the FVF counts them: the game's Varant dungeons have 12, 15, 21), and the
+        // lightmap's.
+        let get = |ty: u32| p.extra.iter().find(|(t, v)| *t == ty && v.len() == nv).map(|(_, v)| v);
+        let sets: Vec<u32> = [15, 18, 21].into_iter().filter(|&t| get(t).is_some()).collect();
+        let lightmap = get(73);
+        let streams = 7 + sets.len() as u32 + lightmap.is_some() as u32;
         u16_(&mut o, 5);
-        u32_(&mut o, 0x2 | 0x10 | 0x40 | 0x80 | 0x100);
+        u32_(&mut o, 0x2 | 0x10 | 0x40 | 0x80 | 0x100 * (1 + sets.len() as u32));
         let (lo, hi) = bbox(p.positions.iter());
         v3(&mut o, lo); v3(&mut o, hi);
         u32_(&mut o, hint(p));
@@ -146,10 +154,12 @@ pub fn write(parts: &[Part]) -> Vec<u8> {
         head(&mut o, 0, p.triangles.len() * 3);
         for t in &p.triangles { for i in t { u32_(&mut o, *i); } }
         head(&mut o, 12, nv); for x in &uv { f(&mut o, x[0]); f(&mut o, x[1]); }
+        for &ty in &sets { head(&mut o, ty, nv); for x in get(ty).unwrap() { f(&mut o, x[0]); f(&mut o, x[1]); } }
         head(&mut o, 5, nv); for x in &spe { u32_(&mut o, *x); }
         head(&mut o, 4, nv); for x in &dif { u32_(&mut o, *x); }
         head(&mut o, 3, nv); for x in &p.normals { v3(&mut o, *x); }
         head(&mut o, 1, nv); for x in &p.positions { v3(&mut o, *x); }
+        if let Some(l) = lightmap { head(&mut o, 73, nv); for x in l { f(&mut o, x[0]); f(&mut o, x[1]); } }
         head(&mut o, 64, nv); for x in &tan { v3(&mut o, *x); }
         for _ in 0..3 { o.push(1); u32_(&mut o, 0); }
         u32_(&mut o, nodes.len() as u32);
@@ -165,18 +175,19 @@ pub fn write(parts: &[Part]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    /// A shipped mesh decoded, written again and decoded once more gives the same triangles, positions, normals
-    /// and uvs per material.
+    /// A shipped mesh decoded, written again and decoded once more gives the same triangles, positions, normals,
+    /// colours and coordinate sets per material: the texture sets 2 to 4 and the lightmap coordinates where the game's
+    /// elements have them.
     #[test]
     fn shipped_meshes_survive_a_rewrite() {
         let Ok(root) = std::env::var("G3_GAME") else { return };
         let g = crate::g3::G3Ctx::open(std::path::Path::new(&root)).unwrap();
-        let mut n = 0;
-        for k in g.keys().into_iter().filter(|k| k.ends_with(".xcmsh")).step_by(61) {
+        let (mut n, mut extra) = (0, 0);
+        for k in g.keys().into_iter().filter(|k| k.ends_with(".xcmsh")).step_by(3) {
             let Ok(m) = crate::g3_res::decode_xcmsh(&g.read(&k).unwrap()) else { continue };
             let geo = &m.geo;
             if geo.normals.len() != geo.positions.len() { continue; }
-            let parts: Vec<super::Part> = geo.submeshes.iter().map(|s| {
+            let parts: Vec<super::Part> = geo.submeshes.iter().enumerate().map(|(e, s)| {
                 let idx = &geo.indices[s.first_index as usize..(s.first_index + s.index_count) as usize];
                 let lo = idx.iter().min().copied().unwrap_or(0);
                 let hi = idx.iter().max().copied().unwrap_or(0);
@@ -189,10 +200,19 @@ mod tests {
                     triangles: idx.chunks_exact(3).map(|c| [c[0] - lo, c[1] - lo, c[2] - lo]).collect(),
                     diffuse: m.diffuse[r.clone()].to_vec(),
                     specular: m.specular[r.clone()].to_vec(),
+                    extra: m.uv_extra.iter().filter(|(t, _)| m.element_streams[e].contains(t)).map(|(t, v)| (*t, v[r.clone()].to_vec())).collect(),
                 }
             }).collect();
             let bm = crate::g3_res::decode_xcmsh(&super::write(&parts)).unwrap_or_else(|e| panic!("{k}: {e:#}"));
-            assert_eq!(bm.streams, vec![0, 12, 5, 4, 3, 1, 64], "{k}");
+            let sets = |m: &crate::g3_res::G3Mesh| -> Vec<Vec<u32>> { m.element_streams.iter().zip(&m.geo.submeshes).filter(|(_, s)| s.index_count > 0).map(|(t, _)| { let mut v: Vec<u32> = t.iter().copied().filter(|t| crate::g3_res::UV_EXTRA.contains(t)).collect(); v.sort(); v }).collect() };
+            assert_eq!(sets(&m), sets(&bm), "{k} coordinate sets");
+            for (t, v) in &m.uv_extra {
+                let ours = &bm.uv_extra.iter().find(|x| x.0 == *t).unwrap_or_else(|| panic!("{k}: no stream {t}")).1;
+                let a: Vec<[f32; 2]> = m.geo.indices.iter().map(|&i| v[i as usize]).collect();
+                let b: Vec<[f32; 2]> = bm.geo.indices.iter().map(|&i| ours[i as usize]).collect();
+                assert_eq!(a, b, "{k} stream {t}");
+                if !a.is_empty() { extra += 1; }
+            }
             let cols = |m: &crate::g3_res::G3Mesh| -> Vec<(u32, u32)> { m.geo.indices.iter().map(|&i| (m.diffuse[i as usize], m.specular[i as usize])).collect() };
             assert_eq!(cols(&m), cols(&bm), "{k} colours");
             let back = bm.geo;
@@ -200,7 +220,7 @@ mod tests {
             assert_eq!(tri(geo), tri(&back), "{k}");
             n += 1;
         }
-        assert!(n > 20, "{n} meshes");
+        assert!(n > 1000 && extra > 300, "{n} meshes, {extra} coordinate sets past the first");
     }
 }
 

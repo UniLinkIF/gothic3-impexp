@@ -127,10 +127,22 @@ def _alpha_cutoff(mat, bsdf):
     return int(mat.get("g3_mask", 128))
 
 
+# UV layers that carry the game's further coordinate sets (see import_mesh.UV_LAYERS): stream type → name.
+UV_EXTRA = {15: "G3_UV2", 18: "G3_UV3", 21: "G3_UV4", 73: "G3_Lightmap"}
+
+
+def _corner_uv(me, layer):
+    u = np.empty(len(me.loops) * 2, np.float32)
+    layer.data.foreach_get("uv", u)
+    return u.reshape(-1, 2)
+
+
 def gather(context, objects, scale, tmp):
-    """Corner arrays of all `objects` (modifiers applied, world space) in game space, plus materials."""
+    """Corner arrays of all `objects` (modifiers applied, world space) in game space, plus materials, plus the further
+    coordinate sets ({stream type: per corner}, game convention) that any object carries as G3_UV2… / G3_Lightmap."""
     dg = context.evaluated_depsgraph_get()
     pos, nrm, uv, mat = [], [], [], []
+    extra, carried = {t: [] for t in UV_EXTRA}, set()
     materials, slot_of = [], {}
     for ob in objects:
         ev = ob.evaluated_get(dg)
@@ -155,12 +167,18 @@ def gather(context, objects, scale, tmp):
             cn = np.empty(len(me.loops) * 3, np.float32)
             me.corner_normals.foreach_get("vector", cn)
             cn = cn.reshape(-1, 3)
-            if me.uv_layers.active:
-                u = np.empty(len(me.loops) * 2, np.float32)
-                me.uv_layers.active.data.foreach_get("uv", u)
-                u = u.reshape(-1, 2)
-            else:
-                u = np.zeros((len(me.loops), 2), np.float32)
+            # The first texture set: the active layer, unless that is one of the further sets.
+            first = me.uv_layers.active if me.uv_layers.active and me.uv_layers.active.name not in UV_EXTRA.values() else next((l for l in me.uv_layers if l.name not in UV_EXTRA.values()), None)
+            u = _corner_uv(me, first) if first else np.zeros((len(me.loops), 2), np.float32)
+            for t, name in UV_EXTRA.items():
+                layer = me.uv_layers.get(name)
+                if layer is None:
+                    # No lightmap texel (-1); a texture set the object lacks is 0.
+                    extra[t].append(np.full((nt * 3, 2), -1.0 if t == 73 else 0.0, np.float32))
+                    continue
+                carried.add(t)
+                x = _corner_uv(me, layer)[loops]
+                extra[t].append(x if t == 73 else np.stack([x[:, 0], 1.0 - x[:, 1]], axis=1))
             p = co[vidx[loops]] / scale
             n = cn[loops]
             t = u[loops]
@@ -181,8 +199,9 @@ def gather(context, objects, scale, tmp):
             ev.to_mesh_clear()
     if not pos:
         return None
+    sets = {t: np.concatenate(extra[t]).astype(np.float32) for t in UV_EXTRA if t in carried}
     return (np.concatenate(pos).astype(np.float32), np.concatenate(nrm).astype(np.float32),
-            np.concatenate(uv).astype(np.float32), np.concatenate(mat).astype(np.uint32), materials)
+            np.concatenate(uv).astype(np.float32), np.concatenate(mat).astype(np.uint32), materials, sets)
 
 
 def _default_name(context):
@@ -257,13 +276,18 @@ class G3_OT_export_mesh(bpy.types.Operator):
             if g is None:
                 self.report({"ERROR"}, "У виділених об'єктах немає трикутників")
                 return {"CANCELLED"}
-            pos, nrm, uv, mat, materials = g
+            pos, nrm, uv, mat, materials, sets = g
             geo = os.path.join(tmp, "geometry.bin")
             with open(geo, "wb") as f:
                 for a in (pos, nrm, uv, mat):
                     f.write(np.ascontiguousarray(a).tobytes())
             spec = os.path.join(tmp, "spec.json")
-            doc = {"name": self.name, "geometry": geo, "corners": len(pos), "materials": materials}
+            doc = {"name": self.name, "geometry": geo, "corners": len(pos), "materials": materials, "uv_extra": []}
+            for t, a in sets.items():
+                p = os.path.join(tmp, f"uv{t}.bin")
+                with open(p, "wb") as f:
+                    f.write(np.ascontiguousarray(a).tobytes())
+                doc["uv_extra"].append({"stream": t, "geometry": p})
             if self.collision != "none":
                 c = {"material": self.shape_material, "mode": self.collision, "convex": []}
                 cg = gather(context, col_objects, self.scale, tmp) if col_objects else None
@@ -307,6 +331,8 @@ class G3_OT_export_mesh(bpy.types.Operator):
             self.report({"INFO"}, f"разом з LOD: {', '.join(r['lods'])}")
         if r.get("lightmaps"):
             self.report({"INFO"}, f"освітлення перенесено на {r['lightmaps']} розміщень у світі")
+        if r.get("pages_kept"):
+            self.report({"INFO"}, f"сторінки лайтмап гри збережено для {r['pages_kept']} частин (форма та сама)")
         self.report({"INFO"}, f"{self.name} ({what}): {r['vertices']} вершин, {r['triangles']} трикутників → {where}")
         return {"FINISHED"}
 

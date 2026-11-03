@@ -8,6 +8,14 @@
   written flat / dull instead of showing the template's own.
 - An actor's new materials are skinned ones (`TransformationType` 2, as 192 of the 193 materials the game's actors
   use); before, they were static materials.
+- A model's further coordinate sets come into Blender as UV layers and go back out: `G3_UV2`…`G3_UV4` (the second to
+  fourth texture sets of Varant's landscape and some buildings, which export used to drop) and `G3_Lightmap` (the
+  coordinates of the lightmap pages).
+- A building lit by lightmap pages keeps them when it is exported with its shape unchanged: each part that is one of
+  the game's elements again goes back in the game's vertex and triangle order, and every placement's lightmap is
+  written as the game's, pages and all (byte for byte from Blender). A changed part is lit per vertex, as before.
+- Import keeps the game's double-sided faces (a second face on the same three corners), which Blender's OBJ importer
+  dropped.
 
 ## 0.9.10 — 2026-11-02
 - An export reads the game as it ships without any mod's volume: ours, a package's put in by `INSTALL.bat`, a mod
