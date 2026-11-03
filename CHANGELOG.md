@@ -1,6 +1,10 @@
 # Changelog
 
 ## Unreleased
+- The actor export lays an actor out as the game's: the default material first and the others numbered from 1, the
+  material map after the FXA and the `.xshmat` table matching the new mesh (before, the map and table stayed the
+  template's while the materials moved by one). An actor that carries its levels of detail gets the new mesh in each,
+  and replacing one also replaces its `_lod1`/`_lod2` beside it.
 - **Export → Gothic 3 New Creature → Mod**: an armature of your own with its mesh and actions becomes a creature:
   `G3_<Word>_Body_01.xact` (`_Skeleton` without a mesh) and clips `<Word>_<words of the game>.xmot`, as the engine ties
   clips to actors. Bones are checked against what the game's code expects (`<Word>_Head_Head_1`, `<Word>_Spine_Spine_1`,
