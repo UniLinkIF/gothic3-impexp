@@ -158,6 +158,17 @@ fn same_cell(game: &[Corner], ours: &[Corner], colors: bool) -> bool {
     game.chunks_exact(3).zip(ours.chunks_exact(3)).all(|(g, o)| (0..3).any(|r| (0..3).all(|k| same(&g[k], &o[(k + r) % 3]))))
 }
 
+/// A cell's ground with its look per triangle (`colors`: the corners' own colours; else as the game's: no look).
+fn ground_of(c: &[Corner], colors: bool) -> crate::lowpoly::Heights {
+    let a = |x: u32| (x >> 24) as f32 / 255.0;
+    let tris = c.chunks_exact(3).map(|t| [t[0].1, t[1].1, t[2].1]).collect();
+    if !colors { return crate::lowpoly::Heights::new(tris); }
+    let looks = c.chunks_exact(3).map(|t| crate::lowpoly::Look { material: t[0].0.clone(), blend: [a(t[0].3), a(t[1].3), a(t[2].3)], light: [a(t[0].4), a(t[1].4), a(t[2].4)] }).collect();
+    crate::lowpoly::Heights::with_looks(tris, looks)
+}
+
+fn export_hash(s: &str) -> u64 { s.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3)) }
+
 /// The edited cells written again; cells that come back unchanged are left out. Errors when nothing changed.
 pub fn build(g: &G3Ctx, spec: &TerrainSpec) -> Result<(TerrainReport, Vec<(String, String, Vec<u8>)>)> {
     let mut r = TerrainReport::default();
@@ -167,12 +178,16 @@ pub fn build(g: &G3Ctx, spec: &TerrainSpec) -> Result<(TerrainReport, Vec<(Strin
         let key = crate::staticmesh::mesh_key(g, &c.name).filter(|k| is_cell(k)).with_context(|| format!("{}: not a landscape cell of the game", c.name))?;
         let stock = crate::g3_res::decode_xcmsh(&g.read(&key)?).with_context(|| key.clone())?;
         let ours = spec_corners(c)?;
-        if same_cell(&game_corners(&stock), &ours, c.corner_data.as_ref().is_some_and(|d| d.colors)) { r.unchanged.push(c.name.clone()); continue; }
-        // Where the ground moved, for the distant land (10 m around it, where the tile's triangles reach in).
-        let edited: Vec<[f32; 3]> = ours.iter().map(|x| x.1).collect();
-        if let Some(area) = crate::lowpoly::changed_area(&stock.geo.positions, &edited, 1000.0) {
-            let stock_t = stock.geo.indices.chunks_exact(3).map(|t| [0, 1, 2].map(|i| stock.geo.positions[t[i] as usize])).collect();
-            changes.push(crate::lowpoly::Change { stock: crate::lowpoly::Heights::new(stock_t), edited: crate::lowpoly::Heights::new(edited.chunks_exact(3).map(|t| [t[0], t[1], t[2]]).collect()), area });
+        let theirs = game_corners(&stock);
+        let colors = c.corner_data.as_ref().is_some_and(|d| d.colors);
+        if same_cell(&theirs, &ours, colors) { r.unchanged.push(c.name.clone()); continue; }
+        // Where the ground moved (10 m around it, where the distant tiles' triangles reach in) or changed its look, for
+        // the distant land. Without colours from Blender the look is the game's.
+        let at = |v: &[Corner]| v.iter().map(|x| (x.1, 0u64)).collect::<Vec<_>>();
+        let looked = |v: &[Corner]| v.iter().map(|x| (x.1, if colors { ((x.3 as u64) << 32 | x.4 as u64) ^ export_hash(&x.0) } else { 0 })).collect::<Vec<_>>();
+        let moved = crate::lowpoly::changed_area(&at(&theirs), &at(&ours), 1000.0);
+        if let Some(area) = moved.or_else(|| crate::lowpoly::changed_area(&looked(&theirs), &looked(&ours), 200.0)) {
+            changes.push(crate::lowpoly::Change { stock: ground_of(&theirs, true), edited: ground_of(&ours, colors), area, moved: moved.is_some() });
         }
         let s = Spec { name: c.name.clone(), geometry: c.geometry.clone(), corners: c.corners, materials: c.materials.iter().map(|m| MatSpec { name: m.name.clone(), diffuse: m.diffuse.clone(), normal: m.normal.clone(), specular: m.specular.clone(), alpha_test: m.alpha_test, shape: m.shape.clone() }).collect(),
             collision: Some(export::CollisionSpec { geometry: None, corners: None, material: Some("earth".into()), mode: Some(spec.collision.clone().unwrap_or_else(|| "auto".into())), materials: vec![], convex: vec![] }), corner_data: c.corner_data.clone() };
@@ -184,13 +199,41 @@ pub fn build(g: &G3Ctx, spec: &TerrainSpec) -> Result<(TerrainReport, Vec<(Strin
         files.extend(f);
     }
     if r.changed.is_empty() { bail!("no cell has changed ({} as the game has them) — nothing to export", r.unchanged.len()); }
-    // The distant land over the moved ground follows.
+    // The distant land over the changed ground follows: its tiles where the ground moved, its picture where the ground
+    // looks otherwise.
     if !changes.is_empty() {
+        let near = |a: &[f32; 4]| changes.iter().any(|c| a[0] <= c.area[2] && c.area[0] <= a[2] && a[1] <= c.area[3] && c.area[1] <= a[3]);
+        let moved: Vec<&crate::lowpoly::Change> = changes.iter().filter(|c| c.moved).collect();
         let all: Vec<&crate::lowpoly::Change> = changes.iter().collect();
-        for (k, _) in crate::lowpoly::tiles(g)?.into_iter().filter(|(_, a)| changes.iter().any(|c| a[0] <= c.area[2] && c.area[0] <= a[2] && a[1] <= c.area[3] && c.area[1] <= a[3])) {
-            if let Some((bytes, _)) = crate::lowpoly::follow(&g.read(&k)?, &all).with_context(|| k.clone())? {
-                r.distant.push(crate::stem_of(g.path_of(&k).unwrap_or(&k)));
-                files.push(("_compiledMesh".to_string(), g.path_of(&k).unwrap_or(&k).to_string(), bytes));
+        let tiles: Vec<(String, [f32; 4])> = crate::lowpoly::tiles(g)?.into_iter().filter(|(_, a)| near(a)).collect();
+        if !moved.is_empty() {
+            for (k, _) in &tiles {
+                if let Some((bytes, _)) = crate::lowpoly::follow(&g.read(k)?, &moved).with_context(|| k.clone())? {
+                    r.distant.push(crate::stem_of(g.path_of(k).unwrap_or(k)));
+                    files.push(("_compiledMesh".to_string(), g.path_of(k).unwrap_or(k).to_string(), bytes));
+                }
+            }
+        }
+        // The pictures, one per distant material; the model learns from the shipped cells under its tiles.
+        let all_cells = cells(g)?;
+        let mut by_image: std::collections::BTreeMap<String, Vec<(crate::g3_res::G3Mesh, [f32; 4])>> = Default::default();
+        for (k, a) in &tiles {
+            let m = crate::g3_res::decode_xcmsh(&g.read(k)?).with_context(|| k.clone())?;
+            let Some(mat) = m.geo.submeshes.first().map(|s| s.material.clone()) else { continue };
+            let Some(tex) = g.find("_compiledmaterial", &mat).and_then(|mk| crate::g3_res::parse_xshmat(&g.read(&mk).ok()?).ok()).and_then(|x| x.textures.first().cloned()) else { continue };
+            let Some(ik) = crate::textures::image_key(g, &tex) else { continue };
+            by_image.entry(ik).or_default().push((m, *a));
+        }
+        for (ik, ts) in by_image {
+            let mut grounds = vec![];
+            for c in all_cells.iter().filter(|c| ts.iter().any(|(_, a)| a[0] <= c.area[2] && c.area[0] <= a[2] && a[1] <= c.area[3] && c.area[1] <= a[3])) {
+                grounds.push(ground_of(&game_corners(&crate::g3_res::decode_xcmsh(&g.read(&c.key)?)?), true));
+            }
+            let gr: Vec<&crate::lowpoly::Heights> = grounds.iter().collect();
+            let meshes: Vec<crate::g3_res::G3Mesh> = ts.into_iter().map(|t| t.0).collect();
+            if let Some((bytes, rep)) = crate::lowpoly::repaint(&g.read(&ik)?, &meshes, &gr, &all).with_context(|| ik.clone())? {
+                r.distant.push(format!("{} ({} texels)", crate::stem_of(g.path_of(&ik).unwrap_or(&ik)), rep.texels));
+                files.push(("_compiledImage".to_string(), g.path_of(&ik).unwrap_or(&ik).to_string(), bytes));
             }
         }
     }
@@ -262,7 +305,10 @@ mod tests {
 
     /// The add-on's files for cells as they came out: geometry (game space, corners in the game's order, V down) and
     /// corner data. `edit` may change a cell's corner positions.
-    pub(crate) fn spec_from_files(out: &serde_json::Value, dir: &Path, edit: &dyn Fn(&str, &mut Vec<[f32; 3]>)) -> TerrainSpec {
+    pub(crate) fn spec_from_files(out: &serde_json::Value, dir: &Path, edit: &dyn Fn(&str, &mut Vec<[f32; 3]>)) -> TerrainSpec { painted(out, dir, edit, &|_, _, d| d) }
+
+    /// `spec_from_files` with `paint` giving each corner's diffuse colour (cell, position, the game's colour).
+    pub(crate) fn painted(out: &serde_json::Value, dir: &Path, edit: &dyn Fn(&str, &mut Vec<[f32; 3]>), paint: &dyn Fn(&str, [f32; 3], u32) -> u32) -> TerrainSpec {
         let mats: Vec<String> = out["materials"].as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap().to_string()).collect();
         let cells = out["cells"].as_array().unwrap().iter().map(|c| {
             let name = c["name"].as_str().unwrap().to_string();
@@ -286,7 +332,7 @@ mod tests {
             let used: Vec<u32> = (0..nt).map(|t| u(tri_at + nt * 3 + t)).collect();
             for t in &used { geo.extend(t.to_le_bytes()); }
             let mut cd = vec![];
-            for &i in &idx { cd.extend(u(col_at + i).to_le_bytes()); }
+            for &i in &idx { cd.extend(paint(&name, p(i), u(col_at + i)).to_le_bytes()); }
             for &i in &idx { cd.extend(u(col_at + nv + i).to_le_bytes()); }
             for s in 0..ne { for &i in &idx { cd.extend(u(uv_at + nv * 2 * (1 + s) + i * 2).to_le_bytes()); cd.extend(u(uv_at + nv * 2 * (1 + s) + i * 2 + 1).to_le_bytes()); } }
             let gp = dir.join(format!("{name}.geo"));
@@ -344,6 +390,50 @@ mod tests {
             let cs = |m: &crate::g3_res::G3Mesh| m.geo.indices.iter().map(|&i| (m.diffuse[i as usize], m.specular[i as usize], m.extra_uvs.iter().map(|e| e.1[i as usize].map(f32::to_bits)).collect::<Vec<_>>())).collect::<Vec<_>>();
             assert!(cs(&ours) == cs(&game), "{query}: colours / uv sets");
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Cell 244 painted in its middle (the layer blend turned all the way to the second layer, 30 m around): only the
+    /// distant land's picture changes besides the cell, and in it only the blocks over the paint; a cell moved but not
+    /// painted leaves the picture alone.
+    #[test]
+    fn painting_a_cell_repaints_the_distant_picture_over_it_only() {
+        let Some(g) = g3() else { return };
+        let dir = std::env::temp_dir().join(format!("g3ie_test_paint_{}", std::process::id()));
+        let sel = select(&cells(&g).unwrap(), "myrtana_landscape_cell_244").unwrap();
+        let out = export_cells(&g, &sel, &dir).unwrap();
+        let a = sel[0].area;
+        let (cx, cz) = ((a[0] + a[2]) / 2.0, (a[1] + a[3]) / 2.0);
+        let spec = painted(&out, &dir, &|_, _| {}, &|_, p, d| if (p[0] - cx).hypot(p[2] - cz) < 3000.0 { d & 0x00ff_ffff } else { d });
+        let (r, files) = build(&g, &spec).unwrap();
+        let img = files.iter().find(|f| f.0 == "_compiledImage").unwrap_or_else(|| panic!("no picture: {:?}", r.files));
+        assert!(r.distant.iter().any(|d| d.contains("texels")) && !files.iter().any(|f| f.1.to_lowercase().contains("_landscape_lowpoly_")), "{:?}", r.distant);
+        let ik = crate::textures::image_key(&g, &img.1).unwrap();
+        let old = g.read(&ik).unwrap();
+        assert_eq!(old.len(), img.2.len());
+        let diff: Vec<usize> = (0..old.len()).filter(|&i| old[i] != img.2[i]).collect();
+        assert!(!diff.is_empty());
+        let (w, _, ours) = crate::textures::decode(&img.2).unwrap();
+        let (_, _, theirs) = crate::textures::decode(&old).unwrap();
+        // Every changed texel shows ground within the painted circle, give or take a triangle of the cell (a triangle
+        // with one painted corner is painted in part) and the 4x4 block around it.
+        let tile = crate::g3_res::decode_xcmsh(&g.read(&g.find("_compiledmesh", "G3_World_Landscape_Lowpoly_068.xcmsh").unwrap()).unwrap()).unwrap();
+        let at: std::collections::HashMap<(u32, u32), (f32, f32)> = crate::lowpoly::texels(&tile, w, w, None).into_iter().map(|t| ((t.0, t.1), (t.2, t.3))).collect();
+        let mut far = 0;
+        let mut moved = 0;
+        for i in 0..(ours.len() / 4) {
+            if ours[i * 4..i * 4 + 3] == theirs[i * 4..i * 4 + 3] { continue; }
+            moved += 1;
+            let (x, y) = ((i as u32) % w, (i as u32) / w);
+            let near = (0..4).flat_map(|dy| (0..4).map(move |dx| ((x / 4) * 4 + dx, (y / 4) * 4 + dy))).filter_map(|k| at.get(&k)).any(|&(gx, gz)| (gx - cx).hypot(gz - cz) < 3000.0 + 1000.0);
+            if !near { far += 1; }
+        }
+        eprintln!("painted: {:?}, {} bytes and {moved} texels changed, {far} far", r.distant, diff.len());
+        assert_eq!(far, 0);
+        // Moved without paint: no picture.
+        let raised = spec_from_files(&out, &dir, &|_, pos| for p in pos.iter_mut() { p[1] += 100.0; });
+        let (_, files) = build(&g, &raised).unwrap();
+        assert!(!files.iter().any(|f| f.0 == "_compiledImage"));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

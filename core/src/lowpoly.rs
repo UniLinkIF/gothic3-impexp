@@ -29,8 +29,14 @@ pub fn tiles(g: &G3Ctx) -> Result<Vec<(String, [f32; 4])>> {
     Ok(v)
 }
 
-/// Heights of a ground (triangles, cm): the highest point above (x, z).
-pub struct Heights { tris: Vec<[[f32; 3]; 3]>, grid: HashMap<(i32, i32), Vec<u32>> }
+/// Heights of a ground (triangles, cm): the highest point above (x, z). With [`Look`]s, also what the distant land's
+/// picture is made of there.
+pub struct Heights { tris: Vec<[[f32; 3]; 3]>, grid: HashMap<(i32, i32), Vec<u32>>, looks: Vec<Look> }
+
+/// What a landscape triangle looks like from afar: its ground material, and per corner the layer blend (diffuse alpha)
+/// and the baked brightness (specular alpha), both 0..1.
+#[derive(Clone, Debug)]
+pub struct Look { pub material: String, pub blend: [f32; 3], pub light: [f32; 3] }
 
 const CELL: f32 = 500.0;
 
@@ -44,7 +50,24 @@ impl Heights {
                 for gz in (z0 / CELL).floor() as i32..=(z1 / CELL).floor() as i32 { grid.entry((gx, gz)).or_default().push(i as u32); }
             }
         }
-        Heights { tris, grid }
+        Heights { tris, grid, looks: vec![] }
+    }
+    /// A ground with a look per triangle.
+    pub fn with_looks(tris: Vec<[[f32; 3]; 3]>, looks: Vec<Look>) -> Self { let mut h = Self::new(tris); h.looks = looks; h }
+    /// The look at (x, z), on the highest triangle there: (material, blend, light).
+    pub fn look(&self, x: f32, z: f32) -> Option<(&str, f32, f32)> {
+        let mut best: Option<(f32, usize, [f32; 3])> = None;
+        for &i in self.grid.get(&((x / CELL).floor() as i32, (z / CELL).floor() as i32))? {
+            let t = &self.tris[i as usize];
+            if let Some(w) = bary(t[0], t[1], t[2], x, z) {
+                let y = w[0] * t[0][1] + w[1] * t[1][1] + w[2] * t[2][1];
+                if best.map_or(true, |b| y > b.0) { best = Some((y, i as usize, w)); }
+            }
+        }
+        let (_, i, w) = best?;
+        let l = self.looks.get(i)?;
+        let mix = |v: [f32; 3]| w[0] * v[0] + w[1] * v[1] + w[2] * v[2];
+        Some((l.material.as_str(), mix(l.blend), mix(l.light)))
     }
     pub fn at(&self, x: f32, z: f32) -> Option<f32> {
         let mut best: Option<f32> = None;
@@ -69,8 +92,9 @@ fn bary(a: [f32; 3], b: [f32; 3], c: [f32; 3], x: f32, z: f32) -> Option<[f32; 3
     (w0 >= -1e-5 && w1 >= -1e-5 && w2 >= -1e-5).then_some([w0, w1, w2])
 }
 
-/// One changed cell: its ground as shipped and as edited, and the box (x, z) of what changed.
-pub struct Change { pub stock: Heights, pub edited: Heights, pub area: [f32; 4] }
+/// One changed cell: its ground as shipped and as edited, the box (x, z) of what changed, and whether the ground moved
+/// (else only its look changed: painted, another material).
+pub struct Change { pub stock: Heights, pub edited: Heights, pub area: [f32; 4], pub moved: bool }
 
 impl Change {
     /// The height the edit added at (x, z); nothing where either ground has no point.
@@ -80,15 +104,131 @@ impl Change {
     }
 }
 
-/// The box (x, z) of the corners an edit moved, added or removed (positions to 0.1 cm), widened by `margin`.
-pub fn changed_area(stock: &[[f32; 3]], edited: &[[f32; 3]], margin: f32) -> Option<[f32; 4]> {
-    let key = |p: &[f32; 3]| p.map(|x| (x * 10.0).round() as i64);
-    let (s, e): (std::collections::HashSet<[i64; 3]>, std::collections::HashSet<[i64; 3]>) = (stock.iter().map(key).collect(), edited.iter().map(key).collect());
+/// The box (x, z) of the corners an edit moved, added, removed or repainted (positions to 0.1 cm, with whatever else
+/// `tag` says of the corner: colours, material), widened by `margin`.
+pub fn changed_area(stock: &[([f32; 3], u64)], edited: &[([f32; 3], u64)], margin: f32) -> Option<[f32; 4]> {
+    let key = |p: &([f32; 3], u64)| (p.0.map(|x| (x * 10.0).round() as i64), p.1);
+    let (s, e): (std::collections::HashSet<([i64; 3], u64)>, std::collections::HashSet<([i64; 3], u64)>) = (stock.iter().map(key).collect(), edited.iter().map(key).collect());
     let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
-    for p in edited.iter().filter(|p| !s.contains(&key(p))).chain(stock.iter().filter(|p| !e.contains(&key(p)))) {
+    for (p, _) in edited.iter().filter(|p| !s.contains(&key(p))).chain(stock.iter().filter(|p| !e.contains(&key(p)))) {
         b = [b[0].min(p[0]), b[1].min(p[2]), b[2].max(p[0]), b[3].max(p[2])];
     }
     (b[0] <= b[2]).then(|| [b[0] - margin, b[1] - margin, b[2] + margin, b[3] + margin])
+}
+
+/// The colour of the distant land's picture from the ground under it, per ground material:
+/// `rgb = a + b · blend + c · light` (least squares over texels of the game's picture over the game's ground; one fit
+/// over all materials where a material has few texels). The game's own bake (its editor's) also has shadows and the
+/// textures' detail, so only differences of this model are put on the game's picture.
+pub struct Model { per: HashMap<String, [[f64; 3]; 3]>, all: [[f64; 3]; 3] }
+
+fn solve3(a: [[f64; 3]; 3], b: [f64; 3]) -> Option<[f64; 3]> {
+    let det = |m: [[f64; 3]; 3]| m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    let d = det(a);
+    if d.abs() < 1e-9 { return None; }
+    Some([0, 1, 2].map(|k| { let mut m = a; for r in 0..3 { m[r][k] = b[r]; } det(m) / d }))
+}
+
+fn fit3(s: &[(f32, f32, [u8; 3])]) -> Option<[[f64; 3]; 3]> {
+    let (mut ata, mut atb) = ([[0f64; 3]; 3], [[0f64; 3]; 3]);
+    for (b, l, c) in s {
+        let f = [1.0, *b as f64, *l as f64];
+        for i in 0..3 { for j in 0..3 { ata[i][j] += f[i] * f[j]; } for ch in 0..3 { atb[ch][i] += f[i] * c[ch] as f64; } }
+    }
+    // A little pull towards no slope keeps a material seen with one blend only solvable.
+    for i in 1..3 { ata[i][i] += 1e-3 * s.len() as f64; }
+    Some([solve3(ata, atb[0])?, solve3(ata, atb[1])?, solve3(ata, atb[2])?])
+}
+
+impl Model {
+    pub fn fit(samples: &[(String, f32, f32, [u8; 3])]) -> Option<Model> {
+        let all = fit3(&samples.iter().map(|s| (s.1, s.2, s.3)).collect::<Vec<_>>())?;
+        let mut by: HashMap<&str, Vec<(f32, f32, [u8; 3])>> = HashMap::new();
+        for s in samples { by.entry(&s.0).or_default().push((s.1, s.2, s.3)); }
+        let per = by.into_iter().filter(|(_, v)| v.len() >= 30).filter_map(|(k, v)| fit3(&v).map(|f| (k.to_string(), f))).collect();
+        Some(Model { per, all })
+    }
+    pub fn predict(&self, material: &str, blend: f32, light: f32) -> [f64; 3] {
+        let m = self.per.get(material).unwrap_or(&self.all);
+        [0, 1, 2].map(|c| m[c][0] + m[c][1] * blend as f64 + m[c][2] * light as f64)
+    }
+}
+
+/// The atlas texels a tile's triangles cover, with the point on the ground each shows: (texel x, texel y, x, z). Only
+/// triangles reaching into `area` when given.
+pub fn texels(tile: &crate::g3_res::G3Mesh, w: u32, h: u32, area: Option<[f32; 4]>) -> Vec<(u32, u32, f32, f32)> {
+    let geo = &tile.geo;
+    let mut out = vec![];
+    for t in geo.indices.chunks_exact(3) {
+        let p = [0, 1, 2].map(|k| geo.positions[t[k] as usize]);
+        if let Some(a) = area {
+            let b = [p.iter().map(|q| q[0]).fold(f32::MAX, f32::min), p.iter().map(|q| q[2]).fold(f32::MAX, f32::min), p.iter().map(|q| q[0]).fold(f32::MIN, f32::max), p.iter().map(|q| q[2]).fold(f32::MIN, f32::max)];
+            if !overlaps(a, b) { continue; }
+        }
+        // The triangle in texel space, as a ground triangle (x, -, z) so `bary` reads it.
+        let q = [0, 1, 2].map(|k| { let u = geo.uvs[t[k] as usize]; [u[0] * w as f32, 0.0, u[1] * h as f32] });
+        let (x0, x1) = (q.iter().map(|v| v[0]).fold(f32::MAX, f32::min).floor().max(0.0) as u32, q.iter().map(|v| v[0]).fold(f32::MIN, f32::max).ceil().min(w as f32) as u32);
+        let (y0, y1) = (q.iter().map(|v| v[2]).fold(f32::MAX, f32::min).floor().max(0.0) as u32, q.iter().map(|v| v[2]).fold(f32::MIN, f32::max).ceil().min(h as f32) as u32);
+        for y in y0..y1 { for x in x0..x1 {
+            let Some(b) = bary(q[0], q[1], q[2], x as f32 + 0.5, y as f32 + 0.5) else { continue };
+            out.push((x, y, b[0] * p[0][0] + b[1] * p[1][0] + b[2] * p[2][0], b[0] * p[0][2] + b[1] * p[1][2] + b[2] * p[2][2]));
+        } }
+    }
+    out
+}
+
+/// Samples of the model: the game's picture (`rgba`, `w` wide) at `texels` over the game's ground `grounds`.
+pub fn samples(rgba: &[u8], w: u32, texels: &[(u32, u32, f32, f32)], grounds: &[&Heights]) -> Vec<(String, f32, f32, [u8; 3])> {
+    texels.iter().filter_map(|&(x, y, gx, gz)| {
+        let (m, b, l) = grounds.iter().find_map(|g| g.look(gx, gz))?;
+        let i = ((y * w + x) * 4) as usize;
+        Some((m.to_string(), b, l, [rgba[i], rgba[i + 1], rgba[i + 2]]))
+    }).collect()
+}
+
+#[derive(serde::Serialize, Default, Debug)]
+pub struct Repaint { pub texels: usize, pub blocks: usize, pub mean_change: f32 }
+
+/// The distant land's picture `ximg` (DXT1, one level, as all of theirs) where `changes` changed the ground's look:
+/// each texel over a change moves by what the model says the edit changed there (its colour for the edited ground
+/// minus for the shipped one); only the 4×4 blocks holding such texels are encoded again, every other byte stays.
+/// `tiles` are the shipped tiles that use the picture, `grounds` the shipped cells around (for the model).
+pub fn repaint(ximg: &[u8], tiles: &[crate::g3_res::G3Mesh], grounds: &[&Heights], changes: &[&Change]) -> Result<Option<(Vec<u8>, Repaint)>> {
+    let (w, h, mut rgba) = crate::textures::decode(ximg)?;
+    let top = (w as usize / 4) * (h as usize / 4) * 8;
+    let end = u32::from_le_bytes(ximg[10..14].try_into().unwrap()) as usize;
+    if !ximg.windows(4).take(200).any(|x| x == b"DXT1") || end > ximg.len() || end < top { anyhow::bail!("the distant land's picture is not one DXT1 level"); }
+    let train: Vec<(u32, u32, f32, f32)> = tiles.iter().flat_map(|t| texels(t, w, h, None)).collect();
+    let Some(model) = Model::fit(&samples(&rgba, w, &train, grounds)) else { return Ok(None) };
+    let mut dirty = std::collections::BTreeSet::new();
+    let (mut n, mut sum) = (0usize, 0f64);
+    for c in changes {
+        for t in tiles {
+            for (x, y, gx, gz) in texels(t, w, h, Some(c.area)) {
+                let (Some(a), Some(b)) = (c.edited.look(gx, gz), c.stock.look(gx, gz)) else { continue };
+                let (pa, pb) = (model.predict(a.0, a.1, a.2), model.predict(b.0, b.1, b.2));
+                let i = ((y * w + x) * 4) as usize;
+                let mut moved = false;
+                for ch in 0..3 {
+                    let v = (rgba[i + ch] as f64 + pa[ch] - pb[ch]).round().clamp(0.0, 255.0) as u8;
+                    if v != rgba[i + ch] { sum += (v as f64 - rgba[i + ch] as f64).abs(); rgba[i + ch] = v; moved = true; }
+                }
+                if moved { n += 1; dirty.insert((y / 4, x / 4)); }
+            }
+        }
+    }
+    if dirty.is_empty() { return Ok(None); }
+    let mut out = ximg.to_vec();
+    let base = end - top;
+    for &(by, bx) in &dirty {
+        let mut block = [0u8; 64];
+        for r in 0..4 { let s = (((by * 4 + r) * w + bx * 4) * 4) as usize; block[r as usize * 16..r as usize * 16 + 16].copy_from_slice(&rgba[s..s + 16]); }
+        let mut enc = [0u8; 8];
+        texpresso::Format::Bc1.compress(&block, 4, 4, texpresso::Params::default(), &mut enc);
+        let at = base + ((by * (w / 4) + bx) as usize) * 8;
+        out[at..at + 8].copy_from_slice(&enc);
+    }
+    Ok(Some((out, Repaint { texels: n, blocks: dirty.len(), mean_change: (sum / (n.max(1) * 3) as f64) as f32 })))
 }
 
 fn overlaps(a: [f32; 4], b: [f32; 4]) -> bool { a[0] <= b[2] && b[0] <= a[2] && a[1] <= b[3] && b[1] <= a[3] }
@@ -216,6 +356,49 @@ mod tests {
         }
     }
 
+    /// How well the model draws the game's own picture: fitted on the texels over cell 244's neighbours under distant
+    /// tile 068, it is asked for 244's own texels (it never saw them) and compared with the game's picture there, and
+    /// with the plainest guess (the mean colour of what it learned from). Mean difference per channel, 0-255.
+    #[test]
+    fn the_model_draws_a_cell_it_never_saw_close_to_the_games_picture() {
+        let Ok(root) = std::env::var("G3_GAME") else { return };
+        let g = G3Ctx::open_original(std::path::Path::new(&root)).unwrap();
+        let tk = g.find("_compiledmesh", "G3_World_Landscape_Lowpoly_068.xcmsh").unwrap();
+        let tile = crate::g3_res::decode_xcmsh(&g.read(&tk).unwrap()).unwrap();
+        let ik = crate::textures::image_key(&g, "G3_World_Lowpoly_Myrtana_01_Diffuse__01").unwrap();
+        let (w, h, rgba) = crate::textures::decode(&g.read(&ik).unwrap()).unwrap();
+        let (lo, hi) = crate::g3_res::xcmsh_box(&g.read(&tk).unwrap()).unwrap();
+        let ground = |k: &str| { let m = crate::g3_res::decode_xcmsh(&g.read(k).unwrap()).unwrap();
+            let a = |x: u32| (x >> 24) as f32 / 255.0;
+            let mut tris = vec![]; let mut looks = vec![];
+            for s in &m.geo.submeshes { let mat = s.material.trim_end_matches(".xshmat").to_lowercase();
+                for t in m.geo.indices[s.first_index as usize..(s.first_index + s.index_count) as usize].chunks_exact(3) {
+                    let v = [t[0], t[1], t[2]].map(|i| i as usize);
+                    tris.push(v.map(|i| m.geo.positions[i]));
+                    looks.push(Look { material: mat.clone(), blend: v.map(|i| a(m.diffuse[i])), light: v.map(|i| a(m.specular[i])) });
+                } }
+            Heights::with_looks(tris, looks) };
+        let cells = crate::terrain::cells(&g).unwrap();
+        let under: Vec<&crate::terrain::Cell> = cells.iter().filter(|c| c.area[0] <= hi[0] && lo[0] <= c.area[2] && c.area[1] <= hi[2] && lo[2] <= c.area[3]).collect();
+        let held = under.iter().find(|c| c.name.eq_ignore_ascii_case("G3_Myrtana_Landscape_Cell_244")).expect("244 under 068");
+        let others: Vec<Heights> = under.iter().filter(|c| c.key != held.key).map(|c| ground(&c.key)).collect();
+        let own = ground(&held.key);
+        let tx = texels(&tile, w, h, None);
+        let train = samples(&rgba, w, &tx, &others.iter().collect::<Vec<_>>());
+        let test = samples(&rgba, w, &tx, &[&own]);
+        let m = Model::fit(&train).unwrap();
+        let mean = [0, 1, 2].map(|c| train.iter().map(|s| s.3[c] as f64).sum::<f64>() / train.len() as f64);
+        let (mut e_model, mut e_flat) = (0f64, 0f64);
+        for s in &test {
+            let p = m.predict(&s.0, s.1, s.2);
+            for c in 0..3 { e_model += (p[c] - s.3[c] as f64).abs(); e_flat += (mean[c] - s.3[c] as f64).abs(); }
+        }
+        let n = (test.len() * 3) as f64;
+        eprintln!("cell 244 under tile 068: {} cells around, {} texels learned, {} texels asked; mean difference model {:.2}, flat {:.2} (of 255)", others.len(), train.len(), test.len(), e_model / n, e_flat / n);
+        assert!(test.len() > 1000 && train.len() > 5000);
+        assert!(e_model / n < 0.8 * e_flat / n && e_model / n < 20.0, "model {:.2}, flat {:.2}", e_model / n, e_flat / n);
+    }
+
     /// A hill on flat ground shows on the tile over it, and only there: the tile's own points far from it stay put.
     #[test]
     fn a_tile_follows_a_hill_and_nothing_else() {
@@ -229,7 +412,7 @@ mod tests {
         let (cx, cz) = ((a[0] + a[2]) / 2.0, (a[1] + a[3]) / 2.0);
         let grid = |bump: f32| { let mut t = vec![]; let s = 500.0; let p = |i: i32, j: i32| { let (x, z) = (cx + i as f32 * s, cz + j as f32 * s); let r = (x - cx).hypot(z - cz); [x, bump * ((4000.0 - r) / 1000.0).clamp(0.0, 1.0), z] };
             for i in -20..20 { for j in -20..20 { t.push([p(i, j), p(i + 1, j), p(i + 1, j + 1)]); t.push([p(i, j), p(i + 1, j + 1), p(i, j + 1)]); } } t };
-        let change = Change { stock: Heights::new(grid(0.0)), edited: Heights::new(grid(1000.0)), area: [cx - 4500.0, cz - 4500.0, cx + 4500.0, cz + 4500.0] };
+        let change = Change { stock: Heights::new(grid(0.0)), edited: Heights::new(grid(1000.0)), area: [cx - 4500.0, cz - 4500.0, cx + 4500.0, cz + 4500.0], moved: true };
         let (bytes, n) = follow(&d, &[&change]).unwrap().unwrap();
         let new = crate::g3_res::decode_xcmsh(&bytes).unwrap();
         let new_h = Heights::new(new.geo.indices.chunks_exact(3).map(|t| [0, 1, 2].map(|i| new.geo.positions[t[i] as usize])).collect());

@@ -29,6 +29,11 @@
 - Motion export **as a new variant** of the clip's action: the next free variant number (the wolf's ambient loops
   01–05 → 06), named the way the game composes clip names. The report says what the game makes of a new name: a
   variant, words the game never composes, or a name it does not look up.
+- A painted cell repaints the **distant land's picture** over it (the 1024² DXT1 atlas of its distant material): each
+  texel moves by what a colour model says the paint changed there (per ground material, colour from layer blend and
+  baked brightness, learned from the game's own picture over the shipped cells around), and only the 4×4 blocks
+  holding such texels are encoded again; every other byte stays the game's. Asked for a cell it never saw, the model
+  is within 2.6 of 255 of the game's picture on average (a flat colour: 3.6).
 - The terrain export brings the **distant land** along: the 300 m tiles the game shows far away
   (`G3_World_Landscape_Lowpoly_*`) over moved ground take the edit's height difference, their triangles there split
   to 8 m (shared across neighbours, so no cracks; uvs, colours and the second uv set from the triangle they lie in).

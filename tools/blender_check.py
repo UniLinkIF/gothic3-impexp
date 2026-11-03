@@ -316,7 +316,8 @@ try:
     r = bpy.ops.gothic3.export_terrain(mode="package", folder=os.path.join(OUT, "terrain_paint"), title="Paint (test)")
     core.run = orig
     rep = seen.get("out", {}).get("report", {})
-    check(r == {"FINISHED"} and [c.lower() for c in rep.get("changed", [])] == ["g3_varant_landscape_cell_244"], f"painted varant cell: {rep.get('changed')}")
+    check(r == {"FINISHED"} and [c.lower() for c in rep.get("changed", [])] == ["g3_varant_landscape_cell_244"] and any("texels" in d for d in rep.get("distant", [])),
+          f"painted varant cell: {rep.get('changed')}, distant picture {rep.get('distant')}")
     # 10. A voice line on an animated head: the head's face bones are on the body's skeleton and move its skin; the
     #     line comes as an action on those bones only, with its voice in the sequencer.
     from gothic3_impexp import lipsync
