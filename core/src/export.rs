@@ -99,8 +99,13 @@ pub struct ConvexSpec { pub geometry: String, pub corners: usize }
 #[derive(Deserialize)]
 pub struct UvSpec { pub stream: u32, pub geometry: String }
 
+/// The far version (`<name>_LOWPOLY`, what the world's distance layer shows) from `*_LOWPOLY` objects, laid out as
+/// the model.
 #[derive(Deserialize, Default)]
-pub struct Spec { pub name: String, pub geometry: String, pub corners: usize, pub materials: Vec<MatSpec>, pub collision: Option<CollisionSpec>, #[serde(default)] pub uv_extra: Vec<UvSpec> }
+pub struct FarSpec { pub geometry: String, pub corners: usize, pub materials: Vec<MatSpec>, #[serde(default)] pub uv_extra: Vec<UvSpec> }
+
+#[derive(Deserialize, Default)]
+pub struct Spec { pub name: String, pub geometry: String, pub corners: usize, pub materials: Vec<MatSpec>, pub collision: Option<CollisionSpec>, #[serde(default)] pub uv_extra: Vec<UvSpec>, #[serde(default)] pub lowpoly: Option<FarSpec> }
 
 #[derive(serde::Serialize, Default)]
 pub struct Report { pub name: String, pub replaced: bool, pub vertices: usize, pub triangles: usize, pub materials: Vec<String>, pub collision: Option<String>, pub convex: Option<String>, pub lightmaps: usize, pub pages_kept: usize, pub lods: Vec<String>, pub files: Vec<String>, pub warnings: Vec<String> }
@@ -390,50 +395,49 @@ fn lightmaps(g: &G3Ctx, orig: &crate::g3_res::G3Mesh, tpath: &str, near: &[Vec<u
     Ok(())
 }
 
-/// The files of the model: (archive, path, bytes). `g` is the game without any mod's volumes.
-pub fn build(g: &G3Ctx, spec: &Spec) -> Result<(Report, Vec<(String, String, Vec<u8>)>)> {
-    let name = clean(&spec.name);
-    if name.is_empty() { bail!("model name is empty"); }
-    let mut r = Report { name: name.clone(), ..Default::default() };
-    let mut files = vec![];
-    let now = crate::volume::filetime_now();
-    let (pos, nrm, uv, tri_mat) = read_geometry(&spec.geometry, spec.corners)?;
-
-    // Materials: the game's own by name, or new ones from a template.
-    let mut mat_names = vec![];
-    for m in &spec.materials {
+/// Materials: the game's own by name, or new ones from a template (each made once; `made`: Blender name → ours).
+fn material_names(g: &G3Ctx, mats: &[MatSpec], now: u64, made: &mut HashMap<String, String>, r: &mut Report, files: &mut Vec<(String, String, Vec<u8>)>) -> Result<Vec<String>> {
+    let mut names = vec![];
+    for m in mats {
+        if let Some(n) = made.get(&m.name) { names.push(n.clone()); continue; }
         let base = clean(&m.name);
-        if g.find("_compiledmaterial", &format!("{base}.xshmat")).is_some() {
+        let mname = if g.find("_compiledmaterial", &format!("{base}.xshmat")).is_some() {
             r.materials.push(format!("{base}: game material"));
-            mat_names.push(base);
-            continue;
-        }
-        // Name: the material's own plus a short hash of its pictures, so two mods' "Material" never collide.
-        let mut h = hash(base.as_bytes());
-        for p in [&m.diffuse, &m.normal, &m.specular].into_iter().flatten() { h ^= hash(&std::fs::read(p).unwrap_or_default()).rotate_left(7); }
-        let mname = format!("G3IE_{base}_{:06x}", h & 0xffffff);
-        let made = make_material(g, m, &mname, false, now, &mut files, &mut r.warnings)?;
-        r.materials.push(format!("{}: new {mname} ({})", m.name, g3_write::look_name(made.template)));
-        mat_names.push(mname);
+            base
+        } else {
+            // Name: the material's own plus a short hash of its pictures, so two mods' "Material" never collide.
+            let mut h = hash(base.as_bytes());
+            for p in [&m.diffuse, &m.normal, &m.specular].into_iter().flatten() { h ^= hash(&std::fs::read(p).unwrap_or_default()).rotate_left(7); }
+            let mname = format!("G3IE_{base}_{:06x}", h & 0xffffff);
+            let t = make_material(g, m, &mname, false, now, files, &mut r.warnings)?;
+            r.materials.push(format!("{}: new {mname} ({})", m.name, g3_write::look_name(t.template)));
+            mname
+        };
+        made.insert(m.name.clone(), mname.clone());
+        names.push(mname);
     }
-    if mat_names.is_empty() { mat_names.push("G3_Objects_Wood_01_B".into()); }
+    if names.is_empty() { names.push("G3_Objects_Wood_01_B".into()); }
+    Ok(names)
+}
 
-    // Parts per material: one vertex per (position, normal, uv). Parts without triangles are left out, so the
-    // lightmaps count the same elements as the mesh.
+/// Corner arrays as parts, one per material: one vertex per (position, normal, uv, further coordinates). Parts
+/// without triangles are left out, so the lightmaps count the same elements as the mesh.
+fn parts_of(geometry: &str, corners: usize, uv_extra: &[UvSpec], mat_names: &[String]) -> Result<(Vec<crate::xcmsh_write::Part>, Vec<[f32; 3]>, Vec<u32>)> {
+    let (pos, nrm, uv, tri_mat) = read_geometry(geometry, corners)?;
     // Further coordinate sets (Blender's G3_UV2… and G3_Lightmap layers), per corner.
     let mut extra_in: Vec<(u32, Vec<[f32; 2]>)> = vec![];
-    for u in &spec.uv_extra {
+    for u in uv_extra {
         if !crate::g3_res::UV_EXTRA.contains(&u.stream) { bail!("coordinate stream {} is not one of {:?}", u.stream, crate::g3_res::UV_EXTRA); }
         let d = std::fs::read(&u.geometry).with_context(|| format!("read {}", u.geometry))?;
-        if d.len() != spec.corners * 8 { bail!("coordinate set {}: {} bytes for {} corners", u.stream, d.len(), spec.corners); }
+        if d.len() != corners * 8 { bail!("coordinate set {}: {} bytes for {} corners", u.stream, d.len(), corners); }
         let f = |i: usize| f32::from_le_bytes(d[i * 4..i * 4 + 4].try_into().unwrap());
-        extra_in.push((u.stream, (0..spec.corners).map(|c| [f(c * 2), f(c * 2 + 1)]).collect()));
+        extra_in.push((u.stream, (0..corners).map(|c| [f(c * 2), f(c * 2 + 1)]).collect()));
     }
     extra_in.sort_by_key(|x| x.0);
     extra_in.dedup_by_key(|x| x.0);
     let mut parts: Vec<crate::xcmsh_write::Part> = mat_names.iter().map(|m| crate::xcmsh_write::Part { material: m.clone(), positions: vec![], normals: vec![], uvs: vec![], triangles: vec![], diffuse: vec![], specular: vec![], extra: extra_in.iter().map(|(t, _)| (*t, vec![])).collect() }).collect();
     let mut seen: Vec<HashMap<Vec<u32>, u32>> = vec![HashMap::new(); parts.len()];
-    for t in 0..spec.corners / 3 {
+    for t in 0..corners / 3 {
         let mi = (tri_mat[t] as usize).min(parts.len() - 1);
         let p = &mut parts[mi];
         let tri = [0, 1, 2].map(|k| {
@@ -449,24 +453,54 @@ pub fn build(g: &G3Ctx, spec: &Spec) -> Result<(Report, Vec<(String, String, Vec
         p.triangles.push(tri);
     }
     parts.retain(|p| !p.triangles.is_empty());
+    Ok((parts, pos, tri_mat))
+}
+
+/// The files of the model: (archive, path, bytes). `g` is the game without any mod's volumes.
+pub fn build(g: &G3Ctx, spec: &Spec) -> Result<(Report, Vec<(String, String, Vec<u8>)>)> {
+    let name = clean(&spec.name);
+    if name.is_empty() { bail!("model name is empty"); }
+    let mut r = Report { name: name.clone(), ..Default::default() };
+    let mut files = vec![];
+    let now = crate::volume::filetime_now();
+    let mut made = HashMap::new();
+    let mat_names = material_names(g, &spec.materials, now, &mut made, &mut r, &mut files)?;
+    let (parts, pos, tri_mat) = parts_of(&spec.geometry, spec.corners, &spec.uv_extra, &mat_names)?;
     r.vertices = parts.iter().map(|p| p.positions.len()).sum();
     r.triangles = spec.corners / 3;
     let existing = crate::staticmesh::mesh_key(g, &name);
     r.replaced = existing.is_some();
     let path = match &existing { Some(k) => g.path_of(k).unwrap_or(k).to_string(), None => format!("gothic3_impexp/{name}.xcmsh") };
     let file_stem = path.rsplit('/').next().unwrap().trim_end_matches(".xcmsh").to_string();
+    // The far version from the *_LOWPOLY objects, with their own materials.
+    let far = match &spec.lowpoly {
+        Some(f) => { let names = material_names(g, &f.materials, now, &mut made, &mut r, &mut files)?; Some(parts_of(&f.geometry, f.corners, &f.uv_extra, &names)?.0) }
+        None => None,
+    };
 
     // The mesh and, when it replaces one, the levels of detail beside it — the same model, colours and lightmaps
-    // taken over from each mesh it replaces.
-    let mut targets = vec![(existing.clone(), path.clone())];
+    // taken over from each mesh it replaces — and the far version the world's distance layer shows
+    // (`G3_World_Lowpoly_Static_Objects_*/<name>_LOWPOLY`, placed there by file name): from the *_LOWPOLY objects, or
+    // else the model itself. A new model gets a far version only from *_LOWPOLY objects, for a world editor to place.
+    let mut targets: Vec<(Option<String>, String, bool)> = vec![(existing.clone(), path.clone(), false)];
     if let Some(k) = &existing {
         for i in 1..=3 {
             let lk = k.replace(".xcmsh", &format!("_lod{i}.xcmsh"));
-            if g.size_of(&lk).is_some() { targets.push((Some(lk.clone()), g.path_of(&lk).unwrap_or(&lk).to_string())); r.lods.push(format!("_lod{i}")); }
+            if g.size_of(&lk).is_some() { targets.push((Some(lk.clone()), g.path_of(&lk).unwrap_or(&lk).to_string(), false)); r.lods.push(format!("_lod{i}")); }
         }
     }
-    for (key, tpath) in &targets {
-        let mut tparts: Vec<crate::xcmsh_write::Part> = parts.iter().map(|p| crate::xcmsh_write::Part { material: p.material.clone(), positions: p.positions.clone(), normals: p.normals.clone(), uvs: p.uvs.clone(), triangles: p.triangles.clone(), diffuse: vec![], specular: vec![], extra: p.extra.clone() }).collect();
+    match (crate::staticmesh::mesh_key(g, &format!("{file_stem}_LOWPOLY")).filter(|_| existing.is_some()), &far) {
+        (Some(lk), _) => {
+            if far.is_none() { r.warnings.push(format!("{file_stem}_LOWPOLY: the far version is the model itself (no *_LOWPOLY object)")); }
+            targets.push((Some(lk.clone()), g.path_of(&lk).unwrap_or(&lk).to_string(), far.is_some()));
+            r.lods.push("_lowpoly".into());
+        }
+        (None, Some(_)) => { targets.push((None, format!("gothic3_impexp/{file_stem}_LOWPOLY.xcmsh"), true)); r.lods.push("_lowpoly".into()); }
+        (None, None) => {}
+    }
+    for (key, tpath, is_far) in &targets {
+        let src = if *is_far { far.as_ref().unwrap() } else { &parts };
+        let mut tparts: Vec<crate::xcmsh_write::Part> = src.iter().map(|p| crate::xcmsh_write::Part { material: p.material.clone(), positions: p.positions.clone(), normals: p.normals.clone(), uvs: p.uvs.clone(), triangles: p.triangles.clone(), diffuse: vec![], specular: vec![], extra: p.extra.clone() }).collect();
         let orig = match key { Some(k) => Some(crate::g3_res::decode_xcmsh(&g.read(k)?).with_context(|| format!("{k}: the mesh it replaces"))?), None => None };
         if let Some(o) = &orig {
             // Parts that are elements of the original again take its order, so its lightmap pages stay theirs.
@@ -687,7 +721,7 @@ mod tests {
         let mats = || geo.submeshes.iter().map(|s| MatSpec { name: s.material.trim_end_matches(".xshmat").to_string(), ..Default::default() }).collect();
         let uv_extra = m.uv_extra.iter().zip(&x).map(|((ty, _), b)| { let f = dir.join(format!("uv{ty}.bin")); std::fs::write(&f, b).unwrap(); UvSpec { stream: *ty, geometry: f.to_string_lossy().into_owned() } }).collect();
         Spec { name: crate::stem_of(key), geometry: geof.to_string_lossy().into_owned(), corners: t.len() * 3, materials: mats(),
-            collision: Some(CollisionSpec { geometry: None, corners: None, material: Some("stone".into()), mode: Some(collision.into()), materials: vec![], convex: vec![] }), uv_extra }
+            collision: Some(CollisionSpec { geometry: None, corners: None, material: Some("stone".into()), mode: Some(collision.into()), materials: vec![], convex: vec![] }), uv_extra, lowpoly: None }
     }
 
     /// The landscape cell written back from its own triangles: same colours, its one lightmap rebuilt to the
@@ -729,16 +763,17 @@ mod tests {
         assert_eq!(crate::g3_res::xnvmsh_triangles(&col.2).unwrap().len(), 14226);
     }
 
-    /// A building written back: its LOD beside it too, every instance's lightmap, the game's collision kept.
+    /// A building written back: its LOD beside it and its far version too, every instance's lightmap, the game's
+    /// collision kept.
     #[test]
     fn a_building_replaced_takes_its_lod_and_lightmaps_along() {
         let Ok(root) = std::env::var("G3_GAME") else { return };
         let g = G3Ctx::open_original(Path::new(&root)).unwrap();
         let key = "_compiledmesh/g3_objects_myrtana_buildings_01/g3_myrtana_house_mill_water_01.xcmsh";
         let (r, files) = build(&g, &spec_of(&g, key, &std::env::temp_dir().join("g3ie_test_mill"), "auto")).unwrap();
-        assert_eq!(r.lods, vec!["_lod1"]);
+        assert_eq!(r.lods, vec!["_lod1", "_lowpoly"]);
         let meshes: Vec<&String> = files.iter().filter(|f| f.1.ends_with(".xcmsh")).map(|f| &f.1).collect();
-        assert_eq!(meshes.len(), 2, "{meshes:?}");
+        assert_eq!(meshes.len(), 3, "{meshes:?}");
         let instances = g.keys().into_iter().filter(|k| k.starts_with("lightmaps/g3_myrtana_house_mill_water_01_")).count();
         assert!(r.lightmaps > 0 && r.lightmaps <= instances, "{} of {instances}", r.lightmaps);
         assert_eq!(r.collision.as_deref(), Some("the game's own collision stays"));
@@ -835,6 +870,39 @@ mod tests {
         std::fs::remove_dir_all(std::env::temp_dir().join(format!("g3ie_test_paged_{}", std::process::id()))).ok();
         eprintln!("{n} meshes: {kept} of {paged} paged elements keep their pages");
         assert!(n >= 20 && kept * 100 >= paged * 95, "{n} meshes: {kept} of {paged} paged elements keep their pages");
+    }
+
+    /// The world's distance layer places `<name>_LOWPOLY` by file name: a replaced building replaces it too — with the
+    /// model itself, or with the far version given (`*_LOWPOLY` objects), whose lighting comes along as the LODs' does.
+    #[test]
+    fn a_replaced_building_replaces_its_far_version() {
+        let Ok(root) = std::env::var("G3_GAME") else { return };
+        let g = G3Ctx::open_original(Path::new(&root)).unwrap();
+        let key = crate::staticmesh::mesh_key(&g, "G3_Architecture_Arena_Manege_01").unwrap();
+        let far_key = crate::staticmesh::mesh_key(&g, "G3_Architecture_Arena_Manege_01_LOWPOLY").unwrap();
+        let far_path = g.path_of(&far_key).unwrap().to_string();
+        let dir = std::env::temp_dir().join(format!("g3ie_test_far_{}", std::process::id()));
+        let mut spec = spec_of(&g, &key, &dir.join("model"), "none");
+        let tris = |f: &[(String, String, Vec<u8>)]| crate::g3_res::decode_xcmsh(&f.iter().find(|f| f.1.eq_ignore_ascii_case(&far_path)).expect("far version written").2).unwrap().geo.indices.len() / 3;
+        let (r, files) = build(&g, &spec).unwrap();
+        assert!(r.lods.contains(&"_lowpoly".to_string()) && r.warnings.iter().any(|w| w.contains("_LOWPOLY: the far version is the model itself")), "{:?} {:?}", r.lods, r.warnings);
+        assert_eq!(tris(&files), r.triangles);
+        // Its own far version: the game's, written back from its triangles.
+        let f = spec_of(&g, &far_key, &dir.join("far"), "none");
+        spec.lowpoly = Some(FarSpec { geometry: f.geometry, corners: f.corners, materials: f.materials, uv_extra: f.uv_extra });
+        let (r, files) = build(&g, &spec).unwrap();
+        let game_far = crate::g3_res::decode_xcmsh(&g.read(&far_key).unwrap()).unwrap();
+        assert_eq!(tris(&files), game_far.geo.indices.len() / 3);
+        assert!(!r.warnings.iter().any(|w| w.contains("_LOWPOLY")), "{:?}", r.warnings);
+        let want = format!("/data/_compiledmesh/{}", far_path.to_lowercase());
+        for l in files.iter().filter(|f| f.0 == "Lightmaps" && crate::lightmap::mesh_path(&f.2).as_deref() == Some(want.as_str())) {
+            assert!(l.2 == g.read(&format!("lightmaps/{}", l.1.to_lowercase())).unwrap(), "{}: the far version's lighting is not the game's", l.1);
+        }
+        // A new model gets one only from *_LOWPOLY objects, beside it.
+        spec.name = "G3IE_Test_New_Arena".into();
+        let (r, files) = build(&g, &spec).unwrap();
+        assert!(files.iter().any(|f| f.1 == "gothic3_impexp/G3IE_Test_New_Arena_LOWPOLY.xcmsh") && r.lods == ["_lowpoly"], "{:?}", r.files);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A new model's materials take the template of their look, with our pictures and a flat normal where the Blender

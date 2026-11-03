@@ -14,6 +14,9 @@
 - A building lit by lightmap pages keeps them when it is exported with its shape unchanged: each part that is one of
   the game's elements again goes back in the game's vertex and triangle order, and every placement's lightmap is
   written as the game's, pages and all (byte for byte from Blender). A changed part is lit per vertex, as before.
+- A replaced building replaces its far version too (`<name>_LOWPOLY`, which the world's distance layer places by file
+  name): with `*_LOWPOLY` objects when the selection has them (or the model has them as children), else with the model
+  itself. A new model with `*_LOWPOLY` objects gets `gothic3_impexp/<name>_LOWPOLY.xcmsh` for a world editor to place.
 - Import keeps the game's double-sided faces (a second face on the same three corners), which Blender's OBJ importer
   dropped.
 

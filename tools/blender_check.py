@@ -255,6 +255,25 @@ try:
     check(r == {"FINISHED"} and streams == [73] and rep.get("pages_kept", 0) > 0 and not any("per vertex" in w for w in rep.get("warnings", [])),
           f"pages kept: {rep.get('pages_kept')} over {rep.get('lightmaps')} lightmaps, streams {streams}, warnings {rep.get('warnings')}")
 
+    # 11. A far version: a *_LOWPOLY object goes to the distance layer's mesh, not into the model.
+    check([export_mesh.is_far(n) for n in ["Tower_LOWPOLY", "Tower_lowpoly.002", "Lowpoly_Tower", "Tower"]] == [True, True, False, False], "is_far")
+    clear()
+    bpy.ops.mesh.primitive_cube_add(location=(0, 0, 0))
+    tower = bpy.context.active_object
+    tower.name = "FarTest_Tower"
+    bpy.ops.mesh.primitive_plane_add(location=(0, 0, 0))
+    bpy.context.active_object.name = "FarTest_Tower_LOWPOLY"
+    bpy.ops.object.select_all(action="SELECT")
+    bpy.context.view_layer.objects.active = tower
+    seen.clear()
+    core.run = spy
+    r = bpy.ops.gothic3.export_mesh(name="FarTest_Tower", mode="package", folder=os.path.join(OUT, "far_pkg"), title="Far (test)", collision="none")
+    core.run = orig
+    rep = seen.get("out", {}).get("report", {})
+    low = seen.get("spec", {}).get("lowpoly") or {}
+    check(r == {"FINISHED"} and rep.get("triangles") == 12 and low.get("corners") == 6 and rep.get("lods") == ["_lowpoly"]
+          and any(f.endswith("FarTest_Tower_LOWPOLY.xcmsh") for f in rep.get("files", [])), f"far version: {rep.get('lods')} {rep.get('files')}")
+
 except Exception:
     traceback.print_exc()
     fails.append("exception")

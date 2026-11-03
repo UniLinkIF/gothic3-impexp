@@ -36,6 +36,14 @@ def collision_kind(name):
     return m.group(1).lower() if m else None
 
 
+# The far version the world's distance layer shows is named after its model with _LOWPOLY at the end.
+_FAR = re.compile(r"_lowpoly(\.\d+)?$", re.IGNORECASE)
+
+
+def is_far(name):
+    return _FAR.search(name) is not None
+
+
 def _linked_image(socket):
     """The image feeding `socket`, through a Normal Map node if there is one."""
     if socket is None or not socket.is_linked:
@@ -204,6 +212,22 @@ def gather(context, objects, scale, tmp):
             np.concatenate(uv).astype(np.float32), np.concatenate(mat).astype(np.uint32), materials, sets)
 
 
+def _write_geometry(g, tmp, prefix):
+    """A gather() result as the core's files: corner arrays, further coordinate sets; the spec's part for them."""
+    pos, nrm, uv, mat, materials, sets = g
+    geo = os.path.join(tmp, f"{prefix}.bin")
+    with open(geo, "wb") as f:
+        for a in (pos, nrm, uv, mat):
+            f.write(np.ascontiguousarray(a).tobytes())
+    out = {"geometry": geo, "corners": len(pos), "materials": materials, "uv_extra": []}
+    for t, a in sets.items():
+        p = os.path.join(tmp, f"{prefix}_uv{t}.bin")
+        with open(p, "wb") as f:
+            f.write(np.ascontiguousarray(a).tobytes())
+        out["uv_extra"].append({"stream": t, "geometry": p})
+    return out
+
+
 def _default_name(context):
     ob = context.active_object
     if ob is None:
@@ -258,8 +282,11 @@ class G3_OT_export_mesh(bpy.types.Operator):
         # Objects named *_COL are the collision shape, *_CV the convex hulls (the bodies of items), the rest the model.
         col_objects = [o for o in selected if collision_kind(o.name) == "col"]
         cv_objects = [o for o in selected if collision_kind(o.name) == "cv"]
-        objects = [o for o in selected if collision_kind(o.name) is None]
-        # A model imported with its collision carries it as a *_COL / *_CV child: it goes along unselected.
+        # *_LOWPOLY objects are the far version.
+        far_objects = [o for o in selected if collision_kind(o.name) is None and is_far(o.name)]
+        objects = [o for o in selected if collision_kind(o.name) is None and not is_far(o.name)]
+        # A model imported with its collision carries it as a *_COL / *_CV child: it goes along unselected (and so does
+        # a *_LOWPOLY child).
         for o in objects:
             for c in o.children_recursive:
                 kind = collision_kind(c.name) if c.type == "MESH" else None
@@ -267,6 +294,8 @@ class G3_OT_export_mesh(bpy.types.Operator):
                     col_objects.append(c)
                 if kind == "cv" and c not in cv_objects:
                     cv_objects.append(c)
+                if kind is None and c.type == "MESH" and is_far(c.name) and c not in far_objects:
+                    far_objects.append(c)
         if not objects or not self.name:
             self.report({"ERROR"}, "Виділіть меш і вкажіть назву моделі")
             return {"CANCELLED"}
@@ -276,18 +305,11 @@ class G3_OT_export_mesh(bpy.types.Operator):
             if g is None:
                 self.report({"ERROR"}, "У виділених об'єктах немає трикутників")
                 return {"CANCELLED"}
-            pos, nrm, uv, mat, materials, sets = g
-            geo = os.path.join(tmp, "geometry.bin")
-            with open(geo, "wb") as f:
-                for a in (pos, nrm, uv, mat):
-                    f.write(np.ascontiguousarray(a).tobytes())
             spec = os.path.join(tmp, "spec.json")
-            doc = {"name": self.name, "geometry": geo, "corners": len(pos), "materials": materials, "uv_extra": []}
-            for t, a in sets.items():
-                p = os.path.join(tmp, f"uv{t}.bin")
-                with open(p, "wb") as f:
-                    f.write(np.ascontiguousarray(a).tobytes())
-                doc["uv_extra"].append({"stream": t, "geometry": p})
+            doc = {"name": self.name, **_write_geometry(g, tmp, "model")}
+            fg = gather(context, far_objects, self.scale, tmp) if far_objects else None
+            if fg is not None:
+                doc["lowpoly"] = _write_geometry(fg, tmp, "far")
             if self.collision != "none":
                 c = {"material": self.shape_material, "mode": self.collision, "convex": []}
                 cg = gather(context, col_objects, self.scale, tmp) if col_objects else None
