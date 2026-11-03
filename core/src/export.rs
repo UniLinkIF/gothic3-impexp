@@ -1046,6 +1046,27 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// A new item with a `*_CV` object gets its convex body, cooked by the game's PhysX as its own `*_CV` are (a CVXM
+    /// stream), beside the model; the placement sidecar names it as the item's convex-hull shape.
+    #[test]
+    fn a_new_item_gets_a_convex_body_from_its_cv_object() {
+        let Ok(root) = std::env::var("G3_GAME") else { return };
+        let g = G3Ctx::open_original(Path::new(&root)).unwrap();
+        let key = crate::staticmesh::mesh_key(&g, "G3_Armor_Helm_Myrtana_01").unwrap();
+        let mut spec = spec_of(&g, &key, &std::env::temp_dir().join(format!("g3ie_test_new_cv_{}", std::process::id())), "auto");
+        spec.name = "G3IE_Test_New_Helm".into();
+        let c = spec.collision.as_mut().unwrap();
+        c.convex = vec![ConvexSpec { geometry: spec.geometry.clone(), corners: spec.corners }];
+        let (r, files) = build(&g, &spec).unwrap();
+        let cv = files.iter().find(|f| f.1 == "gothic3_impexp/G3IE_Test_New_Helm_CV.xnvmsh").unwrap_or_else(|| panic!("{:?}", r.files));
+        let x = crate::g3_res::parse_xnvmsh(&cv.2).unwrap();
+        assert!(x.convex == 1 && x.streams.len() == 1 && x.streams[0].0.starts_with(b"NXS\x01CVXM"));
+        let (v, t) = crate::nxs::read_convex_hull(&x.streams[0].0).unwrap();
+        assert!(v.len() >= 4 && t.len() >= 4);
+        let shapes = r.placement["eCCollisionShape_PS"]["shapes"].as_array().unwrap();
+        assert!(shapes.iter().any(|s| s["ShapeType"] == 6 && s["file"] == "G3IE_Test_New_Helm_CV.xnvmsh"), "{shapes:?}");
+    }
+
     /// A new model's materials take the template of their look, with our pictures and a flat normal where the Blender
     /// material has none; an actor's take the skinned ones.
     #[test]
