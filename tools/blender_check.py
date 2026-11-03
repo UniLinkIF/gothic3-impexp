@@ -180,6 +180,24 @@ try:
     linked = len({o.data.name for o in obs}) < len(obs)
     check(r == {"FINISHED"} and at is not None and abs(at[0] - 897.8) < 0.2 and abs(at[1] + 126.7) < 0.2 and statics > 20 and ground > 0 and linked and not dup,
           f"world layer: {len(obs)} objects, {statics} static, {ground} ground, anvil at {at}, duplicate materials {dup[:3]}")
+    # 8a. Its trees: stand-ins in a collection of their own, marked for the view only, standing up (taller than wide),
+    #     leaves cut at alpha 64; the model export leaves them out.
+    tcol = next((c for c in bpy.data.collections if c.get("g3_view_only")), None)
+    tobs = list(tcol.objects) if tcol else []
+    tall = all(o.dimensions.z > 1.0 and o.get("g3_view_only") for o in tobs)
+    leaf = next((m for m in bpy.data.materials if m.name.startswith("SPT_Leaves_")), None)
+    check(len(tobs) >= 3 and tall and leaf is not None and leaf.get("g3_mask") == 64, f"trees: {len(tobs)} stand-ins, upright {tall}, leaf mask {leaf.get('g3_mask') if leaf else None}")
+    bpy.ops.object.select_all(action="DESELECT")
+    tobs[0].select_set(True)
+    bpy.context.view_layer.objects.active = tobs[0]
+    seen.clear()
+    core.run = spy
+    try:
+        r = bpy.ops.gothic3.export_mesh(name="Tree_Test", mode="package", folder=os.path.join(OUT, "tree_pkg"), title="Tree (test)")
+    except RuntimeError:
+        r = {"CANCELLED"}
+    core.run = orig
+    check(r == {"CANCELLED"} and "out" not in seen, f"a tree stand-in is not exported: {r}")
     if os.environ.get("G3_RENDER"):
         sc = bpy.context.scene
         cam = bpy.data.objects.new("cam", bpy.data.cameras.new("cam"))
@@ -242,12 +260,12 @@ try:
     clear()
     bpy.ops.gothic3.import_mesh(name="G3_Myrtana_Trelis_Channel_Wall_01", with_collision=False)
     wall = bpy.data.objects.get("G3_Myrtana_Trelis_Channel_Wall_01")
-    check(wall is not None and wall.data.uv_layers.get("G3_UV2") is not None and wall.data.uv_layers.active.name == "UVMap", f"second texture set: {[l.name for l in wall.data.uv_layers] if wall else None}")
+    check(wall is not None and wall.data.uv_layers.get("g3_uv15") is not None and wall.data.uv_layers.active.name == "UVMap", f"second texture set: {[l.name for l in wall.data.uv_layers] if wall else None}")
     clear()
     bpy.ops.gothic3.import_mesh(name="G3_Architecture_Arena_Manege_01", with_collision=False)
     arena = bpy.data.objects.get("G3_Architecture_Arena_Manege_01")
     layers = [l.name for l in arena.data.uv_layers] if arena else []
-    check("G3_Lightmap" in layers, f"lightmap coordinates: {layers}")
+    check("g3_uv73" in layers, f"lightmap coordinates: {layers}")
     bpy.ops.object.select_all(action="DESELECT")
     arena.select_set(True)
     bpy.context.view_layer.objects.active = arena
@@ -256,7 +274,7 @@ try:
     r = bpy.ops.gothic3.export_mesh(name="G3_Architecture_Arena_Manege_01", mode="package", folder=os.path.join(OUT, "arena_pkg"), title="Arena (test)", collision="none")
     core.run = orig
     rep = seen.get("out", {}).get("report", {})
-    streams = sorted(u["stream"] for u in seen.get("spec", {}).get("uv_extra", []))
+    streams = sorted((seen.get("spec", {}).get("corner_data") or {}).get("uv_streams", []))
     check(r == {"FINISHED"} and streams == [73] and rep.get("pages_kept", 0) > 0 and not any("per vertex" in w for w in rep.get("warnings", [])),
           f"pages kept: {rep.get('pages_kept')} over {rep.get('lightmaps')} lightmaps, streams {streams}, warnings {rep.get('warnings')}")
     # 10b. One vertex moved: that part gets charts and pages of its own, lit from the game's.
@@ -365,6 +383,156 @@ try:
           and cap.get("ShapeType") == 4 and abs(cap.get("radius", 0) - 25) < 0.5 and abs(cap.get("height", 0) - 150) < 0.5 and near(cap.get("axes", [[], []])[1], [0, 1, 0], 0.01))
     check(ok, f"primitives: box {box.get('center')} {box.get('half_extents')}, sphere {sph.get('radius')}, capsule {cap.get('radius')} {cap.get('height')}, triangles {rep.get('triangles')}")
 
+    # 8b. A wolf's ambient loop goes back as the next free variant of that action (the game has 01-05).
+    clear()
+    bpy.ops.gothic3.import_character(name="G3_Wolf_Body_01", with_head=False)
+    arm = next(o for o in bpy.data.objects if o.type == "ARMATURE")
+    bpy.context.view_layer.objects.active = arm
+    arm.select_set(True)
+    r1 = bpy.ops.gothic3.import_motion(clip="Wolf_Stand_None_None_P0_Ambient_Loop_N_Fwd_02_%_00_P0_0")
+    seen.clear()
+    def spy_m(cmd, *args):
+        out = orig(cmd, *args)
+        if cmd == "export-motion":
+            seen["out"] = out
+            seen["spec"] = json.load(open(args[1], encoding="utf-8"))
+        return out
+    core.run = spy_m
+    r = bpy.ops.gothic3.export_motion(clip="Wolf_Stand_None_None_P0_Ambient_Loop_N_Fwd_02_%_00_P0_0", target="variant", mode="package", folder=os.path.join(OUT, "wolf_variant"), title="Wolf variant (test)")
+    core.run = orig
+    rep = seen.get("out", {}).get("report", {})
+    check(r1 == {"FINISHED"} and r == {"FINISHED"} and rep.get("new") and rep.get("clip") == "Wolf_Stand_None_None_P0_Ambient_Loop_N_Fwd_06_%_00_P0_0" and rep.get("template", "").endswith("_02_%_00_P0_0"),
+          f"motion as a new variant: {rep.get('clip')} ({rep.get('note')})")
+    # 8c. A new clip named from the game's words only: the lists hold the game's words; a dance for the wolf.
+    from gothic3_impexp import export_motion
+    items = [i[0] for i in export_motion._word_items("action")(None, None)]
+    seen.clear()
+    core.run = spy_m
+    r = bpy.ops.gothic3.export_motion(clip="Wolf_Stand_None_None_P0_Ambient_Loop_N_Fwd_02_%_00_P0_0", target="words", stance="Stand", left="None", right="None", pose="P0", action_word="Dance", phase="Loop", nio="N", direction="Fwd", variant=1, mode="package", folder=os.path.join(OUT, "wolf_dance"), title="Wolf dance (test)")
+    core.run = orig
+    rep = seen.get("out", {}).get("report", {})
+    check(r == {"FINISHED"} and "Dance" in items and "Breakdance" not in items and len(items) > 100 and rep.get("clip") == "Wolf_Stand_None_None_P0_Dance_Loop_N_Fwd_01_%_00_P0_0", f"motion from the game's words: {rep.get('clip')} ({len(items)} actions)")
+
+    # 9. Terrain: two neighbouring cells in as one welded mesh; back unchanged, nothing is written; a hill raised in
+    #    the middle of one, only that cell comes back (mesh, collision, lightmap).
+    from gothic3_impexp import terrain
+    import numpy as np
+    clear()
+    r = bpy.ops.gothic3.import_terrain(cells="myrtana_landscape_cell_244 myrtana_landscape_cell_245")
+    ob = next((o for o in bpy.data.objects if o.get("g3_terrain")), None)
+    cells = json.loads(ob["g3_terrain"]) if ob else []
+    me = ob.data if ob else None
+    cell = np.empty(len(me.polygons), np.int32) if me else None
+    if me:
+        me.attributes["g3_cell"].data.foreach_get("value", cell)
+    check(r == {"FINISHED"} and [c["name"].lower() for c in cells] == ["g3_myrtana_landscape_cell_244", "g3_myrtana_landscape_cell_245"] and set(np.unique(cell)) == {0, 1}
+          and "g3_diffuse" in me.color_attributes and "g3_light" in me.color_attributes and len(me.materials) >= 8,
+          f"terrain import: {len(me.polygons) if me else 0} faces, cells {cells}")
+
+    def export_spec(o):
+        t = tempfile.mkdtemp(dir=OUT)
+        sp = os.path.join(t, "terrain.json")
+        with open(sp, "w", encoding="utf-8") as f:
+            json.dump({"cells": terrain.gather_cells(bpy.context, o, 0.01, t)}, f)
+        return sp
+    try:
+        core.run("export-terrain", pr.game_dir, export_spec(ob), "package", os.path.join(OUT, "terrain_same"), "T")
+        same = "exported"
+    except core.CoreError as e:
+        same = str(e)
+    check("nothing to export" in same, f"unchanged terrain: {same}")
+    # A hill of 3 m on cell 244's middle (faces of that cell only).
+    co = np.empty(len(me.vertices) * 3, np.float32)
+    me.vertices.foreach_get("co", co)
+    co = co.reshape(-1, 3)
+    fv = np.array([list(p.vertices) for p in me.polygons if cell[p.index] == 0]).ravel()
+    mid = co[fv].mean(axis=0)
+    d = np.hypot(co[:, 0] - mid[0], co[:, 1] - mid[1])
+    co[:, 2] += np.where(d < 20.0, 3.0 * (1.0 - d / 20.0), 0.0)
+    me.vertices.foreach_set("co", co.ravel())
+    me.update()
+    bpy.ops.object.select_all(action="DESELECT")
+    ob.select_set(True)
+    bpy.context.view_layer.objects.active = ob
+    seen.clear()
+    def spy_t(cmd, *args):
+        out = orig(cmd, *args)
+        if cmd == "export-terrain":
+            seen["out"] = out
+        return out
+    core.run = spy_t
+    pkg = os.path.join(OUT, "terrain_pkg")
+    r = bpy.ops.gothic3.export_terrain(mode="package", folder=pkg, title="Hill (test)")
+    core.run = orig
+    rep = seen.get("out", {}).get("report", {})
+    files = sorted(os.listdir(pkg)) if os.path.isdir(pkg) else []
+    check(r == {"FINISHED"} and [c.lower() for c in rep.get("changed", [])] == ["g3_myrtana_landscape_cell_244"] and len(rep.get("unchanged", [])) == 1 and rep.get("lightmaps") == 1
+          and {"_compiledMesh.vol", "Lightmaps.vol"} <= set(files) and any(f.lower().endswith("cell_244.xnvmsh") for f in rep.get("files", [])) and rep.get("distant"),
+          f"terrain hill: {rep.get('changed')} / {rep.get('unchanged')}, distant {rep.get('distant')}, {files}")
+
+    # 9b. A Varant cell keeps its four uv sets; painting its layer blend is a change.
+    clear()
+    r = bpy.ops.gothic3.import_terrain(cells="varant_landscape_cell_244")
+    ob = next((o for o in bpy.data.objects if o.get("g3_terrain")), None)
+    me = ob.data
+    check(r == {"FINISHED"} and all(f"g3_uv{s}" in me.uv_layers for s in (15, 21, 18)), f"varant uv sets: {[u.name for u in me.uv_layers]}")
+    try:
+        core.run("export-terrain", pr.game_dir, export_spec(ob), "package", os.path.join(OUT, "terrain_same2"), "T")
+        same = "exported"
+    except core.CoreError as e:
+        same = str(e)
+    check("nothing to export" in same, f"unchanged varant cell: {same}")
+    ca = me.color_attributes["g3_diffuse"]
+    c = np.empty(len(ca.data) * 4, np.float32)
+    ca.data.foreach_get("color_srgb", c)
+    c[3:400:4] = 0.0
+    ca.data.foreach_set("color_srgb", c)
+    seen.clear()
+    core.run = spy_t
+    r = bpy.ops.gothic3.export_terrain(mode="package", folder=os.path.join(OUT, "terrain_paint"), title="Paint (test)")
+    core.run = orig
+    rep = seen.get("out", {}).get("report", {})
+    check(r == {"FINISHED"} and [c.lower() for c in rep.get("changed", [])] == ["g3_varant_landscape_cell_244"] and any("texels" in d for d in rep.get("distant", [])),
+          f"painted varant cell: {rep.get('changed')}, distant picture {rep.get('distant')}")
+    # 10. A voice line on an animated head: the head's face bones are on the body's skeleton and move its skin; the
+    #     line comes as an action on those bones only, with its voice in the sequencer.
+    from gothic3_impexp import lipsync
+    clear()
+    r = bpy.ops.gothic3.import_character(name="G3_Hero_Body_Player", with_head=True, head="G3_Head_Hero_Hero_Animated_01")
+    arm = next((o for o in bpy.data.objects if o.type == "ARMATURE"), None)
+    head_ob = next((o for o in bpy.data.objects if o.type == "MESH" and o.get("g3_base", "").lower() == "g3_head_hero_hero_animated_01"), None)
+    check(r == {"FINISHED"} and arm and "Hero_Head_Jaw_B" in arm.data.bones and arm.get("g3_head") == "G3_Head_Hero_Hero_Animated_01" and head_ob and "Hero_Head_Jaw_B" in head_ob.vertex_groups,
+          f"animated head's face bones: {[b.name for b in arm.data.bones if 'Lip' in b.name or 'Jaw' in b.name][:4] if arm else None}")
+    line = next(n for n in core.run("lip-lines", pr.game_dir, "English") if n.startswith("INFO_Ass_Elite_Hard_Bandaro"))
+    bpy.context.view_layer.objects.active = arm
+    arm.select_set(True)
+    seen.clear()
+    def spy_l(cmd, *args):
+        out = orig(cmd, *args)
+        if cmd in ("lipsync", "export-lipsync"):
+            seen[cmd] = out
+            if cmd == "export-lipsync":
+                seen["spec"] = json.load(open(args[1], encoding="utf-8"))
+        return out
+    core.run = spy_l
+    r = bpy.ops.gothic3.import_lipsync(line=line, language="English")
+    core.run = orig
+    act = arm.animation_data.action if arm.animation_data else None
+    paths = {fc.data_path.split('"')[1] for fcs in lipsync._fcurves(act) for fc in fcs} if act else set()
+    se = bpy.context.scene.sequence_editor
+    strips = list(se.strips if hasattr(se, "strips") else se.sequences) if se else []
+    check(r == {"FINISHED"} and act and act.get("g3_lipsync") == line and paths and all(("Lip" in p or "Jaw" in p or "Eye" in p or "UpDown" in p) for p in paths) and any(s.type == "SOUND" for s in strips),
+          f"lip-sync: {len(paths)} bones moved ({sorted(paths)[:3]}), strips {[s.type for s in strips]}")
+    # 10b. The line's action back as its .xlip: every key read as the nearest of the head's poses gives the line's own
+    #      phones at their own times.
+    core.run = spy_l
+    r = bpy.ops.gothic3.export_lipsync(line=line, language="English", head="G3_Head_Hero_Hero_Animated_01", mode="package", folder=os.path.join(OUT, "lip_pkg"), title="Lip (test)")
+    core.run = orig
+    want = seen.get("lipsync", {}).get("timeline", [])
+    got = seen.get("spec", {}).get("phones", [])
+    same = len(want) == len(got) and all(a[1] == b[1] and abs(a[0] - b[0]) < 1e-4 for a, b in zip(want, got))
+    wrong = [(a, b) for a, b in zip(want, got) if a[1] != b[1] or abs(a[0] - b[0]) >= 1e-4][:3]
+    check(r == {"FINISHED"} and same and os.path.isfile(os.path.join(OUT, "lip_pkg", "Speech_English.vol")), f"lip-sync back: {len(got)} of {len(want)} phones, first wrong {wrong}")
 except Exception:
     traceback.print_exc()
     fails.append("exception")

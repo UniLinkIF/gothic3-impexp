@@ -3,7 +3,8 @@ collision.
 
 gothic3-core writes the mesh as OBJ + MTL + PNG into the cache (game axes mirrored in Z, centimetres; positions
 welded, every corner keeping its own uv and normal) and Blender's own OBJ importer brings it in. The game's further
-coordinate sets come beside it (`.uvx`) and become UV layers: G3_UV2…G3_UV4 (more texture sets) and G3_Lightmap. The collision
+coordinate sets come beside it (`.uvx`) and become UV layers `g3_uv<stream>` as the game keeps them, as the terrain's:
+g3_uv15, g3_uv21, g3_uv18 (more texture sets) and g3_uv73 (the lightmap's coordinates). The collision
 (`<name>_COL.xnvmsh`, or `<name>.xnvmsh` beside a landscape cell), when the game has one, comes along as a wireframe
 child named `<name>_COL`, one material per surface (`G3_Shape_<surface>`); an item's convex body (`<name>_CV.xnvmsh`,
 what it has when it lies, falls and rolls) as `<name>_CV`.
@@ -31,9 +32,9 @@ def _import_obj(path, scale):
     return [o for o in bpy.data.objects if o not in before]
 
 
-# The game's further coordinate sets as UV layers: texture sets 2 to 4 (V flipped like the first) and the lightmap's
-# (its own texel space, as stored). Export writes them back.
-UV_LAYERS = {15: "G3_UV2", 18: "G3_UV3", 21: "G3_UV4", 73: "G3_Lightmap"}
+# The game's further coordinate sets as UV layers, named by stream and holding the game's numbers as they are (as the
+# terrain's layers do): texture sets 2 to 4 (15, 21, 18) and the lightmap's coordinates (73). Export writes them back.
+UV_LAYERS = {t: f"g3_uv{t}" for t in (15, 21, 18, 73)}
 
 
 def add_uv_layers(ob, path):
@@ -61,8 +62,6 @@ def add_uv_layers(ob, path):
         if name is None:
             continue
         data = uv[:, k].reshape(-1, 2).copy()
-        if t != 73:
-            data[:, 1] = 1.0 - data[:, 1]
         layer = me.uv_layers.get(name) or me.uv_layers.new(name=name, do_init=False)
         layer.data.foreach_set("uv", data.ravel())
         names.append(name)

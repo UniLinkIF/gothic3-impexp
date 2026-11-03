@@ -13,7 +13,7 @@ import shutil
 import tempfile
 
 import bpy
-from bpy.props import EnumProperty, StringProperty
+from bpy.props import EnumProperty, IntProperty, StringProperty
 
 from . import catalog, core, effects
 from .import_actor import actor_clips
@@ -31,6 +31,36 @@ def _search_clip(self, context, edit_text):
         return []
 
 
+# The words the game makes clip names of (Game.dll / Script.dll tables, from the core), as enum items. Blender keeps
+# only references to the item strings, so they live here.
+_words = {}
+WORD_PROPS = (("stance", "stance"), ("left", "left"), ("right", "right"), ("pose", "pose"), ("action_word", "action"),
+              ("phase", "phase"), ("nio", "nio"), ("direction", "direction"))
+
+
+def _word_items(field):
+    def items(self, context):
+        if field not in _words:
+            try:
+                got = core.run("clip-words")
+            except core.CoreError:
+                return [("None", "None", "")]
+            for k, v in got.items():
+                _words[k] = [(w, w, "") for w in v]
+        return _words.get(field) or [("None", "None", "")]
+    return items
+
+
+def split_clip(name):
+    """(actor, the eight words, variant) of a clip named the composed way, else None."""
+    if "_%_" not in name:
+        return None
+    head = name.split("_%_", 1)[0].split("_")
+    if len(head) != 10 or not head[9].isdigit():
+        return None
+    return head[0], head[1:9], int(head[9])
+
+
 class G3_OT_export_motion(bpy.types.Operator):
     bl_idname = "gothic3.export_motion"
     bl_label = "Gothic 3 Motion → Mod (.xmot)"
@@ -38,7 +68,20 @@ class G3_OT_export_motion(bpy.types.Operator):
 
     category: EnumProperty(name="Категорія", items=catalog.enum_items(catalog.CLIP_CATEGORIES))
     clip: StringProperty(name="Анімація гри", description="Яку анімацію замінити (або взяти за зразок для нової)", search=_search_clip, options={"SKIP_SAVE"})
-    as_name: StringProperty(name="Нова назва", description="Порожньо — замінити анімацію гри; назва — нова анімація поруч (напр. Wolf_Stand_None_Fist_P0_Move_Run_N_Fwd_00_%_00_P0_401)", options={"SKIP_SAVE"})
+    target: EnumProperty(name="Як", items=(
+        ("replace", "Замінити", "Замінити цю анімацію гри"),
+        ("variant", "Новим варіантом", "Нова анімація під наступним вільним номером варіанта тієї ж дії (вовк: Ambient_Loop 01–05 → 06)"),
+        ("words", "Зі слів гри", "Нова назва зі слів, з яких гра складає назви анімацій (стійка, руки, поза, дія, фаза, напрям): іншої назви гра не складе й не зіграє"),
+    ), default="replace", options={"SKIP_SAVE"})
+    stance: EnumProperty(name="Стійка", items=_word_items("stance"), options={"SKIP_SAVE"})
+    left: EnumProperty(name="Ліва рука", items=_word_items("left"), options={"SKIP_SAVE"})
+    right: EnumProperty(name="Права рука", items=_word_items("right"), options={"SKIP_SAVE"})
+    pose: EnumProperty(name="Поза", items=_word_items("pose"), options={"SKIP_SAVE"})
+    action_word: EnumProperty(name="Дія", items=_word_items("action"), options={"SKIP_SAVE"})
+    phase: EnumProperty(name="Фаза", items=_word_items("phase"), options={"SKIP_SAVE"})
+    nio: EnumProperty(name="N / O / I", items=_word_items("nio"), options={"SKIP_SAVE"})
+    direction: EnumProperty(name="Напрям", items=_word_items("direction"), options={"SKIP_SAVE"})
+    variant: IntProperty(name="Варіант", min=0, max=99, default=0, options={"SKIP_SAVE"})
     mode: EnumProperty(name="Куди", items=core.MODES, default="mod")
     folder: StringProperty(name="Тека", subtype="DIR_PATH", description="Куди покласти файл мода чи пакет (типово: файл — у теку Mods гри)")
     title: StringProperty(name="Назва мода", description="Типово — назва анімації", options={"SKIP_SAVE"})
@@ -51,13 +94,32 @@ class G3_OT_export_motion(bpy.types.Operator):
     def invoke(self, context, event):
         if not self.clip:
             self.clip = context.active_object.animation_data.action.get("g3_clip", "")
+        self.fill_words()
         return context.window_manager.invoke_props_dialog(self, width=560)
+
+    def fill_words(self):
+        """The word lists start at the template clip's own words."""
+        got = split_clip(self.clip)
+        if not got:
+            return
+        for (prop, field), w in zip(WORD_PROPS, got[1]):
+            match = next((i[0] for i in _word_items(field)(self, None) if i[0].lower() == w.lower()), None)
+            if match:
+                setattr(self, prop, match)
+        self.variant = got[2]
 
     def draw(self, context):
         col = self.layout.column()
         col.prop(self, "category")
         col.prop(self, "clip")
-        col.prop(self, "as_name")
+        col.prop(self, "target", expand=True)
+        if self.target == "words":
+            box = col.box()
+            for prop, _ in WORD_PROPS:
+                box.prop(self, prop)
+            box.prop(self, "variant")
+            if not split_clip(self.clip):
+                box.label(text="Ця анімація гри названа не так, як гра складає назви", icon="ERROR")
         col.prop(self, "mode", expand=True)
         if self.mode != "install":
             col.prop(self, "folder")
@@ -88,8 +150,11 @@ class G3_OT_export_motion(bpy.types.Operator):
                 o.select_set(True)
         spec = os.path.join(tmp, "spec.json")
         with open(spec, "w", encoding="utf-8") as f:
-            json.dump({"clip": self.clip, "glb": glb, "as_name": self.as_name or None, "effects": effects.as_times(context.scene, action)}, f)
-        target = self.as_name or self.clip
+            doc = {"clip": self.clip, "glb": glb, "variant": self.target == "variant", "effects": effects.as_times(context.scene, action)}
+            if self.target == "words":
+                doc["compose"] = {"words": [getattr(self, p) for p, _ in WORD_PROPS], "variant": self.variant}
+            json.dump(doc, f)
+        target = self.clip
         try:
             out, where = core.deliver("export-motion", spec, self.mode, target, self.title, self.folder)
             if self.mode == "install":
@@ -102,6 +167,8 @@ class G3_OT_export_motion(bpy.types.Operator):
             shutil.rmtree(tmp, ignore_errors=True)
         r = out["report"]
         what = f"нова, за зразком {r['template']}" if r["new"] else "замінено"
+        if r.get("note"):
+            self.report({"WARNING"} if "never" in r["note"] or "only" in r["note"] else {"INFO"}, f"{r['clip']}: {r['note']}")
         self.report({"INFO"}, f"{r['clip']} ({what}): {r['bones']} кісток, {r['keys']} ключів, {r['effects']} ефектів, {r['duration']:.2f} с — {action.name} → {where}")
         return {"FINISHED"}
 

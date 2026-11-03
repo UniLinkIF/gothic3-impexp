@@ -24,12 +24,27 @@
 //! gothic3-core installed <game>                             mods installed from Blender
 //! gothic3-core uninstall <game> <mod>                       remove one
 //! gothic3-core world-layers <game>                         the world layers (.node stems) to pick from
-//! gothic3-core world <game> <layer> <radius cm> <out dir> [noground]
+//! gothic3-core world <game> <layer> <radius cm> <out dir> [noground] [notrees]
 //!                                                           a layer as context: its placements and, within the radius,
 //!                                                           the static cells' and the landscape, meshes as OBJ
+//! gothic3-core clip-words                                  the words clip names are made of, per field (Game.dll, Script.dll)
+//! gothic3-core clip-variants <game> <clip>                the game's variants of the clip's action, the next free name
+//! gothic3-core lip-lines <game> [language]                the voice lines with a lip-sync timeline
+//! gothic3-core lipsync <game> <head> <line> <language> <out dir>
+//!                                                           a voice line on an animated head's face bones (glb) + its .ogg
+//! gothic3-core export-lipsync <game> <spec.json> install <mod> | package <folder> <title> | mod <file.g3mod> <name> [author]
+//!                                                           a line's phones as its .xlip, where the game looks for it
+//! gothic3-core terrain-cells <game>                         the landscape cells: name, land, box over the ground
+//! gothic3-core terrain <game> <cells | @x,z,r> <out dir> [trees]
+//!                                                           landscape cells to edit, with all they carry (.g3terrain);
+//!                                                           the trees on them as stand-ins to look at
+//! gothic3-core export-terrain <game> <spec.json> install <mod> | package <folder> <title>
+//!                                                           | mod <file.g3mod> <name> [author]
+//!                                                           the edited cells back (unchanged ones are left out)
 //! ```
 
 mod charts;
+mod clip_words;
 mod cook;
 mod dds;
 mod export;
@@ -47,7 +62,11 @@ mod rebake;
 mod geom;
 mod glb;
 mod lightmap;
+mod lipsync;
+mod lowpoly;
+mod speedtree;
 mod staticmesh;
+mod terrain;
 mod textures;
 mod volume;
 mod world;
@@ -82,13 +101,34 @@ fn clips_for(g: &g3::G3Ctx, actor: &str, words: &str, limit: usize) -> Result<Ve
     Ok(all.into_iter().map(|x| x.0).filter(|n| { let l = n.to_lowercase(); l.starts_with(&format!("{rig}_")) && ws.iter().all(|w| l.contains(w.as_str())) }).take(limit).collect())
 }
 
-/// Put `head`'s meshes on `body`: head bones map to the body's by name (the rigs share them); a head bone the
-/// body lacks maps to the body's head bone. Returns notes on what did not map.
+/// Put `head`'s meshes on `body`: head bones map to the body's by name (the rigs share them). Head bones the body
+/// lacks that move the head's skin (the face bones of the animated heads: lips, jaw, brows, and the bones above them)
+/// join the body's skeleton under their own parents; any other (slots, the head's own node) maps to the body's head
+/// bone. Returns notes on what did not map.
 fn attach(body: &mut g3_actor::G3Actor, head: &g3_actor::G3Actor, head_name: &str) -> Vec<String> {
-    let find = |n: &str| body.nodes.iter().position(|b| b.name.eq_ignore_ascii_case(n));
+    let find = |body: &g3_actor::G3Actor, n: &str| body.nodes.iter().position(|b| b.name.eq_ignore_ascii_case(n));
     let fallback = body.nodes.iter().position(|b| { let l = b.name.to_lowercase(); l.ends_with("_head") || l.contains("head_head") }).unwrap_or(0);
+    let mut map: Vec<Option<usize>> = head.nodes.iter().map(|n| find(body, &n.name)).collect();
+    // Bones that move the skin, and their ancestors up to one the body has.
+    let mut moves = vec![false; head.nodes.len()];
+    for w in head.meshes.iter().flat_map(|m| m.weights.iter().flatten()).filter(|w| w.1 > 0.0) {
+        let mut n = Some(w.0 as usize);
+        while let Some(i) = n.filter(|&i| i < moves.len() && map[i].is_none() && !moves[i]) { moves[i] = true; n = head.nodes[i].parent; }
+    }
+    let mut added = vec![];
+    loop {
+        let before = added.len();
+        for i in 0..head.nodes.len() {
+            if map[i].is_some() || !moves[i] { continue; }
+            let parent = match head.nodes[i].parent { Some(p) if moves[p] && map[p].is_none() => continue, Some(p) => map[p].unwrap_or(fallback), None => fallback };
+            body.nodes.push(g3_actor::G3Node { name: head.nodes[i].name.clone(), parent: Some(parent), pos: head.nodes[i].pos, rot: head.nodes[i].rot });
+            map[i] = Some(body.nodes.len() - 1);
+            added.push(head.nodes[i].name.clone());
+        }
+        if added.len() == before { break; }
+    }
     let mut missing = std::collections::BTreeSet::new();
-    let map: Vec<usize> = head.nodes.iter().map(|n| find(&n.name).unwrap_or_else(|| { missing.insert(n.name.clone()); fallback })).collect();
+    let map: Vec<usize> = head.nodes.iter().zip(&map).map(|(n, m)| m.unwrap_or_else(|| { missing.insert(n.name.clone()); fallback })).collect();
     let base = body.materials.len() as u32;
     body.materials.extend(head.materials.iter().cloned());
     for m in &head.meshes {
@@ -99,7 +139,10 @@ fn attach(body: &mut g3_actor::G3Actor, head: &g3_actor::G3Actor, head_name: &st
         for t in m.tri_material.iter_mut() { *t += base; }
         body.meshes.push(m);
     }
-    if missing.is_empty() { vec![] } else { vec![format!("head bones not in the body (put on its head bone): {}", missing.into_iter().collect::<Vec<_>>().join(", "))] }
+    let mut notes = vec![];
+    if !added.is_empty() { notes.push(format!("{} face bones of the head joined the skeleton", added.len())); }
+    if !missing.is_empty() { notes.push(format!("head bones not in the body (put on its head bone): {}", missing.into_iter().collect::<Vec<_>>().join(", "))); }
+    notes
 }
 
 fn run(args: &[String]) -> Result<serde_json::Value> {
@@ -181,7 +224,49 @@ fn run(args: &[String]) -> Result<serde_json::Value> {
         (Some("world"), Some(game)) => {
             let g = open(game)?;
             let radius: f32 = a(4).context("radius (cm)")?.parse().context("radius (cm)")?;
-            world::area_obj(&g, a(3).context("world layer")?, radius, a(6) != Some("noground"), Path::new(a(5).context("out dir")?))?
+            let flags = &args[args.len().min(6)..];
+            world::area_obj(&g, a(3).context("world layer")?, radius, !flags.iter().any(|f| f == "noground"), !flags.iter().any(|f| f == "notrees"), Path::new(a(5).context("out dir")?))?
+        }
+        (Some("clip-words"), _) => clip_words::words(),
+        (Some("clip-variants"), Some(game)) => serde_json::to_value(motion_write::variants(&g3::G3Ctx::open_original(Path::new(game))?, a(3).context("clip")?)?)?,
+        (Some("lip-lines"), Some(game)) => serde_json::to_value(lipsync::lines(Path::new(game), a(3).unwrap_or("English"))?)?,
+        (Some("lipsync"), Some(game)) => {
+            let g = open(game)?;
+            serde_json::to_value(lipsync::build(&g, a(3).context("head actor")?, a(4).context("voice line")?, a(5).unwrap_or("English"), Path::new(a(6).context("out dir")?))?)?
+        }
+        (Some("export-lipsync"), Some(game)) => {
+            let spec: lipsync::LipSpec = serde_json::from_str(&std::fs::read_to_string(a(3).context("spec.json")?)?).context("lip-sync spec")?;
+            let (report, file) = lipsync::export(&spec)?;
+            let mut out = mods::deliver(Path::new(game), a(4).unwrap_or("install"), a(5).context("mod name, package folder or mod file")?, a(6).unwrap_or(""), a(7).unwrap_or(""), &[file])?;
+            out["report"] = report;
+            out
+        }
+        (Some("terrain-cells"), Some(game)) => serde_json::to_value(terrain::cells(&open(game)?)?)?,
+        (Some("terrain"), Some(game)) => {
+            // The cells as the game ships them: what the export compares with and writes over.
+            let g = g3::G3Ctx::open_original(Path::new(game))?;
+            let cells = terrain::select(&terrain::cells(&g)?, a(3).context("cells or @x,z,radius")?)?;
+            let out_dir = Path::new(a(4).context("out dir")?);
+            let mut v = terrain::export_cells(&g, &cells, out_dir)?;
+            if a(5) == Some("trees") {
+                // The trees standing on the cells, as stand-ins to look at.
+                let trees = world::trees_in(&g, &cells.iter().map(|c| c.area).collect::<Vec<_>>());
+                let (mut meshes, mut warnings) = (serde_json::Map::new(), vec![]);
+                world::tree_stand_ins(&g, &trees, out_dir, &mut meshes, &mut warnings)?;
+                v["trees"] = serde_json::to_value(&trees)?;
+                v["tree_meshes"] = serde_json::Value::Object(meshes);
+                if let Some(w) = v["warnings"].as_array_mut() { w.extend(warnings.into_iter().map(serde_json::Value::from)); }
+            }
+            v
+        }
+        (Some("export-terrain"), Some(game)) => {
+            // Cells are compared with, and written over, the game's own.
+            let g = g3::G3Ctx::open_original(Path::new(game))?;
+            let spec: terrain::TerrainSpec = serde_json::from_str(&std::fs::read_to_string(a(3).context("spec.json")?)?).context("terrain spec")?;
+            let (report, files) = terrain::build(&g, &spec)?;
+            let mut out = mods::deliver(Path::new(game), a(4).unwrap_or("install"), a(5).context("mod name, package folder or mod file")?, a(6).unwrap_or(""), a(7).unwrap_or(""), &files)?;
+            out["report"] = serde_json::to_value(report)?;
+            out
         }
         (Some("installed"), Some(game)) => serde_json::to_value(mods::installed(Path::new(game))?)?,
         (Some("uninstall"), Some(game)) => { mods::uninstall(Path::new(game), a(3).context("mod name")?)?; serde_json::json!(true) }
@@ -231,6 +316,30 @@ mod export_tests {
             assert!(out.join("_compiledAnimation.vol").is_file(), "{cmd}");
         }
         std::fs::remove_dir_all(&game).ok();
+    }
+}
+
+#[cfg(test)]
+mod head_tests {
+    /// An animated head brings its face bones onto the body, each under its own parent (the jaw's second bone under its
+    /// first, that under the head), and its skin keeps them; a plain head brings none.
+    #[test]
+    fn an_animated_head_brings_its_face_bones() {
+        let Some(root) = std::env::var_os("G3_GAME") else { return };
+        let g = super::g3::G3Ctx::open_original(std::path::Path::new(&root)).unwrap();
+        let rd = |n: &str| super::g3_actor::decode_xact(&g.read(&g.find("_compiledanimation", &format!("{n}.xact")).unwrap()).unwrap()).unwrap();
+        let mut body = rd("G3_Hero_Body_Player");
+        let n0 = body.nodes.len();
+        let notes = super::attach(&mut body, &rd("G3_Head_Hero_Hero_Animated_01"), "G3_Head_Hero_Hero_Animated_01");
+        let at = |n: &str| body.nodes.iter().position(|b| b.name == n).unwrap_or_else(|| panic!("{n} not on the body: {notes:?}"));
+        let (jb, ja, hh) = (at("Hero_Head_Jaw_B"), at("Hero_Head_Jaw_A"), at("Hero_Head_Head_1"));
+        assert_eq!((body.nodes[jb].parent, body.nodes[ja].parent), (Some(ja), Some(hh)));
+        assert_eq!(body.nodes.len() - n0, 22, "{notes:?}");
+        let head_mesh = body.meshes.iter().find(|m| m.label.is_some()).unwrap();
+        assert!(head_mesh.weights.iter().flatten().any(|w| w.0 as usize == jb), "the jaw moves the skin");
+        let mut plain = rd("G3_Hero_Body_Player");
+        super::attach(&mut plain, &rd("G3_Head_Hero_Hero_01"), "G3_Head_Hero_Hero_01");
+        assert_eq!(plain.nodes.len(), n0);
     }
 }
 

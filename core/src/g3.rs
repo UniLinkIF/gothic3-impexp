@@ -184,6 +184,18 @@ impl G3Ctx {
     }
 }
 
+/// The bytes of one entry of the volume at `path` (for archives `G3Ctx` leaves out, such as speech).
+pub fn read_entry(path: &Path, e: &G3Entry) -> Result<Vec<u8>> {
+    let mut f = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    f.seek(SeekFrom::Start(e.offset))?;
+    let mut raw = vec![0u8; e.stored as usize];
+    f.read_exact(&mut raw)?;
+    if e.compression == 0 { return Ok(raw); }
+    let mut out = Vec::with_capacity(e.size as usize);
+    ZlibDecoder::new(&raw[..]).read_to_end(&mut out).with_context(|| format!("inflate {}", e.path))?;
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

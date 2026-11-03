@@ -75,9 +75,9 @@ pub fn make_charts(p: &mut Part) -> Tail {
     // Vertices per (vertex, chart).
     let old = std::mem::take(&mut p.positions);
     let (old_n, old_uv) = (std::mem::take(&mut p.normals), std::mem::take(&mut p.uvs));
-    let old_x: Vec<(u32, Vec<[f32; 2]>)> = std::mem::take(&mut p.extra).into_iter().filter(|(t, _)| *t != 73).collect();
+    let old_x: Vec<(u32, Vec<[f32; 2]>)> = std::mem::take(&mut p.extra_uvs).into_iter().filter(|(t, _)| *t != 73).collect();
     let (old_d, old_s) = (std::mem::take(&mut p.diffuse), std::mem::take(&mut p.specular));
-    p.extra = old_x.iter().map(|(t, _)| (*t, vec![])).collect();
+    p.extra_uvs = old_x.iter().map(|(t, _)| (*t, vec![])).collect();
     let mut at: HashMap<(u32, usize), u32> = HashMap::new();
     let mut tail = Tail::default();
     let mut chart_v: Vec<Vec<u32>> = vec![vec![]; groups.len()];
@@ -89,7 +89,7 @@ pub fn make_charts(p: &mut Part) -> Tail {
             p.positions.push(old[i as usize]);
             if old_n.len() == old.len() { p.normals.push(old_n[i as usize]); }
             if old_uv.len() == old.len() { p.uvs.push(old_uv[i as usize]); }
-            for (k, (_, v)) in old_x.iter().enumerate() { if v.len() == old.len() { p.extra[k].1.push(v[i as usize]); } }
+            for (k, (_, v)) in old_x.iter().enumerate() { if v.len() == old.len() { p.extra_uvs[k].1.push(v[i as usize]); } }
             if old_d.len() == old.len() { p.diffuse.push(old_d[i as usize]); }
             if old_s.len() == old.len() { p.specular.push(old_s[i as usize]); }
             if c == usize::MAX { tail.unlit_vertices.push(j); } else { chart_v[c].push(j); }
@@ -97,7 +97,7 @@ pub fn make_charts(p: &mut Part) -> Tail {
         }));
         if c == usize::MAX { tail.unlit_triangles.push(t as u32); }
     }
-    p.extra.retain(|(_, v)| v.len() == p.positions.len());
+    p.extra_uvs.retain(|(_, v)| v.len() == p.positions.len());
     // A frame per chart: its normal, the plane's main direction as U, V = U × N; (u, v) from 0.
     let mut l73 = vec![[-1.0f32, -1.0]; p.positions.len()];
     for (c, members) in groups.iter().enumerate() {
@@ -121,8 +121,8 @@ pub fn make_charts(p: &mut Part) -> Tail {
         tris.sort();
         tail.charts.push(Chart::new(chart_v[c].clone(), tris, u, v, n, t, [hi[0] - lo[0], hi[1] - lo[1]]));
     }
-    p.extra.push((73, l73));
-    p.extra.sort_by_key(|x| x.0);
+    p.extra_uvs.push((73, l73));
+    p.extra_uvs.sort_by_key(|x| crate::g3_res::EXTRA_UV_STREAMS.iter().position(|t| *t == x.0).unwrap_or(9));
     tail
 }
 
@@ -263,8 +263,8 @@ fn locate(tris: &[[[f32; 2]; 3]], q: [f32; 2]) -> Option<(usize, [f32; 3])> {
 /// old texel facing the same way) or, where it has nothing facing that way, `fallback` (a colour per vertex of `p`).
 /// Without either the pages carry no texels, as the game's own pages without texels do.
 pub fn pages(p: &Part, tail: &Tail, s: f32, old: &OldTexels, fallback: &[u32], baked: Option<&Baked>) -> Vec<u8> {
-    let l73 = p.extra.iter().find(|x| x.0 == 73).map(|x| x.1.as_slice()).unwrap_or(&[]);
-    let bake_uv = p.extra.iter().find(|x| x.0 == BAKE_UV && x.1.len() == p.positions.len()).map(|x| x.1.as_slice());
+    let l73 = p.extra_uvs.iter().find(|x| x.0 == 73).map(|x| x.1.as_slice()).unwrap_or(&[]);
+    let bake_uv = p.extra_uvs.iter().find(|x| x.0 == BAKE_UV && x.1.len() == p.positions.len()).map(|x| x.1.as_slice());
     let baked = baked.zip(bake_uv);
     // The old texels by the axis their chart faces most, and all of them.
     let axis = |n: [f32; 3]| { let k = (0..3).max_by(|&a, &b| n[a].abs().total_cmp(&n[b].abs())).unwrap(); k * 2 + (n[k] < 0.0) as usize };
@@ -362,7 +362,7 @@ mod tests {
             if !(0..lm.count).any(|e| lm.has_pages(e)) { continue; }
             let Some(mk) = crate::lightmap::mesh_path(&d).and_then(|p| g.find("_compiledmesh", p.rsplit('/').next().unwrap())) else { continue };
             let m = crate::g3_res::decode_xcmsh(&g.read(&mk).unwrap()).unwrap();
-            let Some(l73) = m.uv_extra.iter().find(|x| x.0 == 73).map(|x| &x.1) else { continue };
+            let Some(l73) = m.extra_uvs.iter().find(|x| x.0 == 73).map(|x| &x.1) else { continue };
             let tails: Vec<Option<crate::charts::Tail>> = m.element_tails.iter().map(|t| crate::charts::parse(t).ok()).collect();
             let Some(s) = super::texel_size(&tails, &lm) else { continue };
             let old = super::old_texels(&m, &tails, &lm);
@@ -376,7 +376,7 @@ mod tests {
                 let part = crate::xcmsh_write::Part {
                     material: String::new(), positions: m.geo.positions[first..first + n].to_vec(), normals: vec![], uvs: vec![],
                     triangles: m.geo.indices[sm.first_index as usize..(sm.first_index + sm.index_count) as usize].chunks_exact(3).map(|c| [c[0], c[1], c[2]].map(|i| i - first as u32)).collect(),
-                    diffuse: vec![], specular: vec![], extra: vec![(73, l73[first..first + n].to_vec())], tail: vec![],
+                    diffuse: vec![], specular: vec![], extra_uvs: vec![(73, l73[first..first + n].to_vec())], tail: vec![],
                 };
                 let ours = super::read_pages(&super::pages(&part, t, s, &old, &[], None));
                 for (a, b) in ours.iter().zip(super::read_pages(&lm.pages[e])) {
@@ -412,7 +412,7 @@ mod tests {
         for (e, sm) in m.geo.submeshes.iter().enumerate() {
             let (first, n) = (m.elements[e].0 as usize, m.elements[e].1 as usize);
             let mut p = crate::xcmsh_write::Part { material: String::new(), positions: m.geo.positions[first..first + n].to_vec(), normals: m.geo.normals[first..first + n].to_vec(), uvs: vec![],
-                triangles: m.geo.indices[sm.first_index as usize..(sm.first_index + sm.index_count) as usize].chunks_exact(3).map(|c| [c[0], c[1], c[2]].map(|i| i - first as u32)).collect(), diffuse: vec![], specular: vec![], extra: vec![], tail: vec![] };
+                triangles: m.geo.indices[sm.first_index as usize..(sm.first_index + sm.index_count) as usize].chunks_exact(3).map(|c| [c[0], c[1], c[2]].map(|i| i - first as u32)).collect(), diffuse: vec![], specular: vec![], extra_uvs: vec![], tail: vec![] };
             let nt = p.triangles.len();
             let t = super::make_charts(&mut p);
             assert_eq!(crate::charts::parse(&crate::charts::write(&t)).unwrap(), t);
@@ -420,7 +420,7 @@ mod tests {
             for c in &t.charts { for &x in &c.triangles { seen[x as usize] += 1; } }
             for &x in &t.unlit_triangles { seen[x as usize] += 1; }
             assert!(seen.iter().all(|&k| k == 1), "element {e}: a triangle in none or two charts");
-            let l73 = &p.extra.iter().find(|x| x.0 == 73).unwrap().1;
+            let l73 = &p.extra_uvs.iter().find(|x| x.0 == 73).unwrap().1;
             assert_eq!(l73.len(), p.positions.len());
             for c in &t.charts {
                 assert!(c.max[0] <= super::MAX_SIDE * 1.8 && c.max[1] <= super::MAX_SIDE * 1.8);

@@ -5,7 +5,7 @@
 //! every corner keeps its own uv and normal, so seams stay. Triangle order is taken as stored, unless most
 //! triangles face away from their own normals, in which case all are turned.
 //!
-//! The further coordinate sets (texture sets 2 to 4, the lightmap's; see `g3_res::UV_EXTRA`) go beside it as
+//! The further coordinate sets (texture sets 2 to 4, the lightmap's; see `g3_res::EXTRA_UV_STREAMS`) go beside it as
 //! `<stem>.uvx`, as the game keeps them, for the add-on to put on as UV layers:
 //! ```text
 //! "G3UVX1" · u32 sets · u32 stream type per set · u32 faces · per face (OBJ order): u8 1 when it has vertices of its
@@ -70,7 +70,7 @@ pub fn export_obj(g: &G3Ctx, name: &str, out_dir: &Path) -> Result<MeshOut> {
     let key = mesh_key(g, name).with_context(|| format!("{name}: no such mesh in Gothic 3"))?;
     let stem = key.rsplit('/').next().unwrap().trim_end_matches(".xcmsh").to_string();
     let mesh = crate::g3_res::decode_xcmsh(&g.read(&key)?).with_context(|| format!("decode {key}"))?;
-    let (geo, m_extra) = (&mesh.geo, &mesh.uv_extra);
+    let (geo, m_extra) = (&mesh.geo, &mesh.extra_uvs);
     std::fs::create_dir_all(out_dir)?;
     let mut warnings = vec![];
     let materials: Vec<Material> = geo.submeshes.iter().map(|s| material(g, &s.material, out_dir, &mut warnings)).collect();

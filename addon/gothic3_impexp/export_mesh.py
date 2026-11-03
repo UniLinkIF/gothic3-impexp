@@ -181,7 +181,7 @@ def _alpha_cutoff(mat, bsdf):
 
 
 # UV layers that carry the game's further coordinate sets (see import_mesh.UV_LAYERS): stream type → name.
-UV_EXTRA = {15: "G3_UV2", 18: "G3_UV3", 21: "G3_UV4", 73: "G3_Lightmap"}
+UV_EXTRA = {t: f"g3_uv{t}" for t in (15, 21, 18, 73)}
 
 
 def _corner_uv(me, layer):
@@ -192,7 +192,7 @@ def _corner_uv(me, layer):
 
 def gather(context, objects, scale, tmp):
     """Corner arrays of all `objects` (modifiers applied, world space) in game space, plus materials, plus the further
-    coordinate sets ({stream type: per corner}, game convention) that any object carries as G3_UV2… / G3_Lightmap."""
+    coordinate sets ({stream type: per corner}, the game's numbers) that any object carries as g3_uv15 / 21 / 18 / 73."""
     dg = context.evaluated_depsgraph_get()
     pos, nrm, uv, mat = [], [], [], []
     extra, carried = {t: [] for t in UV_EXTRA}, set()
@@ -231,7 +231,7 @@ def gather(context, objects, scale, tmp):
                     continue
                 carried.add(t)
                 x = _corner_uv(me, layer)[loops]
-                extra[t].append(x if t == 73 else np.stack([x[:, 0], 1.0 - x[:, 1]], axis=1))
+                extra[t].append(x)
             p = co[vidx[loops]] / scale
             n = cn[loops]
             t = u[loops]
@@ -376,12 +376,15 @@ def _write_geometry(g, tmp, prefix):
     with open(geo, "wb") as f:
         for a in (pos, nrm, uv, mat):
             f.write(np.ascontiguousarray(a).tobytes())
-    out = {"geometry": geo, "corners": len(pos), "materials": materials, "uv_extra": []}
-    for t, a in sets.items():
-        p = os.path.join(tmp, f"{prefix}_uv{t}.bin")
+    out = {"geometry": geo, "corners": len(pos), "materials": materials}
+    if sets:
+        # The further sets as the core's corner data (as the terrain sends them), in the game's stream order.
+        p = os.path.join(tmp, f"{prefix}_corners.bin")
+        order = [t for t in (15, 21, 18, 73) if t in sets]
         with open(p, "wb") as f:
-            f.write(np.ascontiguousarray(a).tobytes())
-        out["uv_extra"].append({"stream": t, "geometry": p})
+            for t in order:
+                f.write(np.ascontiguousarray(sets[t], np.float32).tobytes())
+        out["corner_data"] = {"file": p, "colors": False, "uv_streams": order}
     return out
 
 
@@ -444,6 +447,11 @@ class G3_OT_export_mesh(bpy.types.Operator):
 
     def execute(self, context):
         selected = [o for o in context.selected_objects if o.type == "MESH"]
+        # Stand-ins brought in to look at (SpeedTree) are never models.
+        view_only = [o for o in selected if o.get("g3_view_only")]
+        if view_only:
+            self.report({"WARNING"}, f"Пропущено {len(view_only)} заглушок лише для огляду (дерева SpeedTree)")
+            selected = [o for o in selected if not o.get("g3_view_only")]
         # Objects named *_COL are the collision shape, *_CV the convex hulls (the bodies of items), the rest the model.
         col_objects = [o for o in selected if collision_kind(o.name) == "col"]
         cv_objects = [o for o in selected if collision_kind(o.name) == "cv"]

@@ -2,7 +2,8 @@
 //! else stay, its mesh, skin and materials become ours.
 //!
 //! ```text
-//! 0   "GENOMFLE" · u16 1 · u32 string-table offset · … · FILETIME at 24 · u32 FXA bytes at 32
+//! 0   "GENOMFLE" · u16 1 · u32 string-table offset · u16 54 · … · FILETIME at 24 (compiled) · u32 source bytes at 32
+//!     (the size of what it was compiled from: the FXA itself in every actor compiled since August 2006)
 //!     · … "gena" · u16 · u32 FXA bytes (at 74) · "FXA " u8 1 u8 1 (at 78) · sections · mesh extra data · table
 //! section  u32 id · u32 size · u32 version · body
 //!   3 v3  mesh: u32 node · u32 vertices · u32 corners · u32 indices · u32 parts · u32 uv channels (1) · u32 (kept)
@@ -213,6 +214,34 @@ pub(crate) mod tests {
             assert_eq!(b.materials.len(), a.materials.len());
             assert_eq!(crate::staticmesh::needs_turn(&b.meshes[0].positions, &b.meshes[0].normals, b.meshes[0].triangles.iter().copied()), true, "{name}: Gothic 3 order");
         }
+    }
+
+    /// The u32 at 32 is the size of the source the actor was compiled from (the slot `.xmot` and `.ximg` use for theirs).
+    /// Every actor compiled from August 2006 on (FILETIME at 24) has the FXA length there; the 66 that do not were all
+    /// compiled earlier, from bigger sources (all larger than their FXA). Ours is compiled now from the FXA it holds.
+    #[test]
+    fn the_source_size_is_the_fxa_length_as_in_every_later_actor() {
+        let Ok(root) = std::env::var("G3_GAME") else { return };
+        let g = crate::g3::G3Ctx::open_original(std::path::Path::new(&root)).unwrap();
+        const AUG_2006: u64 = 127_988_640_000_000_000; // 2006-08-01 as FILETIME
+        let (mut later, mut older_other) = (0, 0);
+        for k in g.keys().into_iter().filter(|k| k.ends_with(".xact")) {
+            let d = g.read(&k).unwrap();
+            if d.get(78..82) != Some(b"FXA ") { continue; }
+            let (time, source, fxa) = (u64::from_le_bytes(d[24..32].try_into().unwrap()), u32_at(&d, 32), u32_at(&d, 74));
+            assert!(source >= fxa, "{k}");
+            if time >= AUG_2006 { assert_eq!(source, fxa, "{k}"); later += 1; } else if source != fxa { older_other += 1; }
+        }
+        assert!(later > 100 && older_other == 66, "{later} later, {older_other} older with another source size");
+        let k = g.find("_compiledanimation", "G3_Head_Hero_Hero_01.xact").unwrap();
+        let d = g.read(&k).unwrap();
+        let a = crate::g3_actor::decode_xact(&d).unwrap();
+        let s = own_skin(&a, "G3_Head_Hero_Hero_01", "G3_Head_Hero_Hero_01", &std::env::temp_dir().join(format!("g3ie_test_source_{}", std::process::id())));
+        let input = read_input(&s).unwrap();
+        let mats: Vec<NewMaterial> = a.materials.iter().map(|x| NewMaterial { name: x.name.clone(), diffuse: x.diffuse.clone(), normal: x.normal.clone(), specular: x.specular.clone() }).collect();
+        let (w, _) = replace_mesh(&d, &input, &mats).unwrap();
+        assert_eq!(u32_at(&w, 32), u32_at(&w, 74));
+        assert!(u64::from_le_bytes(w[24..32].try_into().unwrap()) > AUG_2006);
     }
 
     /// A new actor's name becomes a file name the way a model's does: typed with Cyrillic, spaces or slashes it never

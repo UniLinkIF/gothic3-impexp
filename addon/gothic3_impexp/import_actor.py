@@ -51,6 +51,8 @@ def import_character(name, clips="", limit=40, head="-"):
     arm = next((o for o in obs if o.type == "ARMATURE"), None)
     if arm:
         arm["g3_actor"] = name
+        if head and head != "-":
+            arm["g3_head"] = head
         arm.name = name
         arm.data.display_type = "STICK"
         arm.show_in_front = True

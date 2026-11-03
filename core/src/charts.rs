@@ -105,7 +105,7 @@ mod tests {
         let (mut far_lit, mut far_off) = (0, 0);
         for k in g.keys().into_iter().filter(|k| k.ends_with(".xcmsh")) {
             let Ok(m) = crate::g3_res::decode_xcmsh(&g.read(&k).unwrap()) else { continue };
-            let l73 = m.uv_extra.iter().find(|x| x.0 == 73).map(|x| &x.1);
+            let l73 = m.extra_uvs.iter().find(|x| x.0 == 73).map(|x| &x.1);
             let mut per_element = vec![];
             for (e, raw) in m.element_tails.iter().enumerate() {
                 if raw.is_empty() { per_element.push(vec![]); continue; }

@@ -5,13 +5,14 @@
 //! · u16 30 · u32 2 · properties  BoundingBox bCBox (u16 30, u32 24, min, max) · ResourcePriority float 0
 //! · u16 35 (mesh version) · u16 30 · u32 first element's size hint · f32 0 · u32 elements
 //! element (one per material, version 5, as the game's own):
-//!   u16 5 · u32 FVF (0x1d2: position, normal, diffuse, specular, uv) · f32 min[3] max[3] · u32 size hint
-//!   · "<material>.xshmat" · u32 streams · per stream: u32 type · u16 1 · u8 1 · u32 count · data
-//!     0 indices u32 · 12 uv f32×2 · 5 specular u32 · 4 diffuse u32 · 3 normals f32×3 · 1 positions f32×3
-//!     · 15 / 18 / 21 texture sets 2 to 4, f32×2 (FVF + 0x100 each) · 73 lightmap coordinates f32×2
-//!     · 64 tangents f32×3 (× handedness)
+//!   u16 5 · u32 FVF (0x1d2: position, normal, diffuse, specular, uv; + 0x100 per further texture set: 0x4d2 with four)
+//!   · f32 min[3] max[3] · u32 size hint · "<material>.xshmat" · u32 streams · per stream: u32 type · u16 1 · u8 1
+//!   · u32 count · data, in this order (the game's, see the test):
+//!     0 indices u32 · (15 uv f32×2) · 12 uv f32×2 · 5 specular u32 · 4 diffuse u32 · 3 normals f32×3
+//!     · 1 positions f32×3 · (21 uv · 18 uv) · (73 lightmap coordinates f32×2, not in the FVF) · 64 tangents f32×3
+//!     (× handedness); the bracketed sets only where the part has them
 //!   · u8 1 · u32 0 · u8 1 · u32 0 · u8 1 · u32 0   (unlit vertices and triangles, lightmap charts: empty as in the
-//!     landscape, or the game's element's own, see `charts`)
+//!     landscape, or the part's own, see `charts`)
 //!   · u32 nodes · per node: f32 radius · f32 centre[3] · u32 first · u32 count   (a sphere tree in preorder: a leaf
 //!     has count 1, its triangles run from `first` to the next leaf's `first`; an inner node counts its subtree)
 //!   · u8 1 · u32 triangles · u32 triangle per slot
@@ -30,8 +31,9 @@ pub struct Part {
     /// Vertex colours (ARGB); empty = white / opaque black.
     pub diffuse: Vec<u32>,
     pub specular: Vec<u32>,
-    /// Further coordinates per vertex by stream type (`g3_res::UV_EXTRA`: 15, 18, 21 texture sets 2 to 4, 73 lightmap).
-    pub extra: Vec<(u32, Vec<[f32; 2]>)>,
+    /// Further coordinate sets by stream (`g3_res::EXTRA_UV_STREAMS`: 15, 21, 18 texture sets 2 to 4, 73 the lightmap's),
+    /// one per vertex. Other streams (the bake's) are not written.
+    pub extra_uvs: Vec<(u32, Vec<[f32; 2]>)>,
     /// The element's unlit lists and lightmap charts as stored (`charts`); empty: none.
     pub tail: Vec<u8>,
 }
@@ -139,14 +141,13 @@ pub fn write(parts: &[Part]) -> Vec<u8> {
         let spe: Vec<u32> = if p.specular.len() == nv { p.specular.clone() } else { vec![LIT; nv] };
         let tan = tangents(&p.positions, &p.normals, &uv, &p.triangles);
         let (nodes, order) = sphere_tree(&p.positions, &p.triangles);
-        // The further texture sets the part has (the FVF counts them: the game's Varant dungeons have 12, 15, 21), and the
-        // lightmap's.
-        let get = |ty: u32| p.extra.iter().find(|(t, v)| *t == ty && v.len() == nv).map(|(_, v)| v);
-        let sets: Vec<u32> = [15, 18, 21].into_iter().filter(|&t| get(t).is_some()).collect();
-        let lightmap = get(73);
-        let streams = 7 + sets.len() as u32 + lightmap.is_some() as u32;
+        // Further sets in the game's places: 15 before the first set, 21 and 18 after the positions, then the
+        // lightmap's (73); the FVF counts the texture sets, not the lightmap's.
+        let get = |ty: u32| p.extra_uvs.iter().find(|(t, v)| *t == ty && v.len() == nv).map(|(_, v)| v);
+        let sets = [15, 21, 18].into_iter().filter(|&t| get(t).is_some()).count() as u32;
+        let streams = 7 + sets + get(73).is_some() as u32;
         u16_(&mut o, 5);
-        u32_(&mut o, 0x2 | 0x10 | 0x40 | 0x80 | 0x100 * (1 + sets.len() as u32));
+        u32_(&mut o, 0x2 | 0x10 | 0x40 | 0x80 | 0x100 * (1 + sets));
         let (lo, hi) = bbox(p.positions.iter());
         v3(&mut o, lo); v3(&mut o, hi);
         u32_(&mut o, hint(p));
@@ -156,13 +157,14 @@ pub fn write(parts: &[Part]) -> Vec<u8> {
         let head = |o: &mut Vec<u8>, ty: u32, n: usize| { u32_(o, ty); u16_(o, 1); o.push(1); u32_(o, n as u32); };
         head(&mut o, 0, p.triangles.len() * 3);
         for t in &p.triangles { for i in t { u32_(&mut o, *i); } }
-        head(&mut o, 12, nv); for x in &uv { f(&mut o, x[0]); f(&mut o, x[1]); }
-        for &ty in &sets { head(&mut o, ty, nv); for x in get(ty).unwrap() { f(&mut o, x[0]); f(&mut o, x[1]); } }
+        let uvs = |o: &mut Vec<u8>, ty: u32, v: &[[f32; 2]]| { head(o, ty, v.len()); for x in v { f(o, x[0]); f(o, x[1]); } };
+        if let Some(v) = get(15) { uvs(&mut o, 15, v); }
+        uvs(&mut o, 12, &uv);
         head(&mut o, 5, nv); for x in &spe { u32_(&mut o, *x); }
         head(&mut o, 4, nv); for x in &dif { u32_(&mut o, *x); }
         head(&mut o, 3, nv); for x in &p.normals { v3(&mut o, *x); }
         head(&mut o, 1, nv); for x in &p.positions { v3(&mut o, *x); }
-        if let Some(l) = lightmap { head(&mut o, 73, nv); for x in l { f(&mut o, x[0]); f(&mut o, x[1]); } }
+        for ty in [21, 18, 73] { if let Some(v) = get(ty) { uvs(&mut o, ty, v); } }
         head(&mut o, 64, nv); for x in &tan { v3(&mut o, *x); }
         if p.tail.is_empty() { for _ in 0..3 { o.push(1); u32_(&mut o, 0); } } else { o.extend(&p.tail); }
         u32_(&mut o, nodes.len() as u32);
@@ -203,15 +205,19 @@ mod tests {
                     triangles: idx.chunks_exact(3).map(|c| [c[0] - lo, c[1] - lo, c[2] - lo]).collect(),
                     diffuse: m.diffuse[r.clone()].to_vec(),
                     specular: m.specular[r.clone()].to_vec(),
-                    extra: m.uv_extra.iter().filter(|(t, _)| m.element_streams[e].contains(t)).map(|(t, v)| (*t, v[r.clone()].to_vec())).collect(),
+                    extra_uvs: m.extra_uvs.iter().filter(|(t, _)| m.element_streams[e].contains(t)).map(|(t, v)| (*t, v[r.clone()].to_vec())).collect(),
                     tail: if lo == m.elements[e].0 && hi + 1 == m.elements[e].0 + m.elements[e].1 { m.element_tails[e].clone() } else { vec![] },
                 }
             }).collect();
             let bm = crate::g3_res::decode_xcmsh(&super::write(&parts)).unwrap_or_else(|e| panic!("{k}: {e:#}"));
-            let sets = |m: &crate::g3_res::G3Mesh| -> Vec<Vec<u32>> { m.element_streams.iter().zip(&m.geo.submeshes).filter(|(_, s)| s.index_count > 0).map(|(t, _)| { let mut v: Vec<u32> = t.iter().copied().filter(|t| crate::g3_res::UV_EXTRA.contains(t)).collect(); v.sort(); v }).collect() };
-            assert_eq!(sets(&m), sets(&bm), "{k} coordinate sets");
-            for (t, v) in &m.uv_extra {
-                let ours = &bm.uv_extra.iter().find(|x| x.0 == *t).unwrap_or_else(|| panic!("{k}: no stream {t}")).1;
+            // Per element: the further sets, in the writer's order, and the FVF the game gives them.
+            let live = |m: &crate::g3_res::G3Mesh| -> Vec<(Vec<u32>, u32)> { m.element_streams.iter().zip(&m.element_fvf).zip(&m.geo.submeshes).filter(|(_, s)| s.index_count > 0).map(|((t, f), _)| (t.iter().copied().filter(|t| crate::g3_res::EXTRA_UV_STREAMS.contains(t)).collect(), *f)).collect() };
+            let order = |v: &[u32]| { let mut v = v.to_vec(); v.sort_by_key(|t| [15, 21, 18, 73].iter().position(|x| x == t)); v };
+            let (a, b) = (live(&m), live(&bm));
+            // (An element without uvs at all still gets the first set from the writer: its FVF counts one more.)
+            assert_eq!(a.iter().map(|(t, f)| (order(t), if *f & 0xf00 == 0 { 0x100 } else { *f & 0xf00 })).collect::<Vec<_>>(), b.iter().map(|(t, f)| (t.clone(), *f & 0xf00)).collect::<Vec<_>>(), "{k}: further sets and the FVF's texture count");
+            for (t, v) in &m.extra_uvs {
+                let ours = &bm.extra_uvs.iter().find(|x| x.0 == *t).unwrap_or_else(|| panic!("{k}: no stream {t}")).1;
                 let a: Vec<[f32; 2]> = m.geo.indices.iter().map(|&i| v[i as usize]).collect();
                 let b: Vec<[f32; 2]> = bm.geo.indices.iter().map(|&i| ours[i as usize]).collect();
                 assert_eq!(a, b, "{k} stream {t}");
@@ -248,5 +254,41 @@ mod tree_tests {
             // the leaf and every ancestor (a node whose subtree spans i) hold its triangles
             for a in 0..=i { if a + nodes[a].3 as usize > i { let (r, c, _, _) = nodes[a]; for &t in &order[nodes[i].2 as usize..end as usize] { for &v in &tris[t as usize] { let p = pos[v as usize]; let d = ((p[0] - c[0]).powi(2) + (p[1] - c[1]).powi(2) + (p[2] - c[2]).powi(2)).sqrt(); assert!(d <= r + 1e-2); } } } }
         }
+    }
+}
+
+#[cfg(test)]
+mod order_tests {
+    /// Where the game's own elements put the further coordinate streams, counted over every shipped mesh, and the FVF
+    /// they give: the writer's order is the one most of them have (all of Varant's landscape cells), and an element's
+    /// texture count is 1 + its sets among 15, 18, 21 — the lightmap's 73 never counts.
+    #[test]
+    fn further_sets_go_where_the_games_files_have_them() {
+        let Ok(root) = std::env::var("G3_GAME") else { return };
+        let g = crate::g3::G3Ctx::open(std::path::Path::new(&root)).unwrap();
+        // (relation) → (elements where it holds, elements where it does not)
+        let mut c: std::collections::BTreeMap<&str, (usize, usize)> = Default::default();
+        let (mut fvf_ok, mut fvf_bad) = (0, 0);
+        for k in g.keys().into_iter().filter(|k| k.ends_with(".xcmsh")) {
+            let Ok(m) = crate::g3_res::decode_xcmsh(&g.read(&k).unwrap()) else { continue };
+            for (t, f) in m.element_streams.iter().zip(&m.element_fvf) {
+                let at = |s: u32| t.iter().position(|&x| x == s);
+                let mut count = |name: &'static str, holds: Option<bool>| if let Some(h) = holds { let e = c.entry(name).or_default(); if h { e.0 += 1 } else { e.1 += 1 } };
+                count("15 before 12", at(15).zip(at(12)).map(|(a, b)| a < b));
+                count("21 before 18", at(21).zip(at(18)).map(|(a, b)| a < b));
+                count("21 after the positions", at(21).zip(at(1)).map(|(a, b)| a > b));
+                count("18 after the positions", at(18).zip(at(1)).map(|(a, b)| a > b));
+                count("73 after the texture sets", at(73).map(|a| [15, 21, 18].iter().filter_map(|&s| at(s)).all(|b| b < a)));
+                count("73 right before 64", at(73).zip(at(64)).map(|(a, b)| a + 1 == b));
+                if [15, 18, 21, 73].iter().any(|&s| at(s).is_some()) {
+                    let sets = [15, 18, 21].iter().filter(|&&s| at(s).is_some()).count() as u32;
+                    if f >> 8 & 0xf == 1 + sets { fvf_ok += 1 } else { fvf_bad += 1 }
+                }
+            }
+        }
+        eprintln!("{c:#?}\nFVF texture count = 1 + sets: {fvf_ok}, not: {fvf_bad}");
+        for (name, (yes, no)) in &c { assert!(yes > no, "{name}: {yes} hold, {no} not"); }
+        assert!(c["15 before 12"].0 > 1000 && c["21 before 18"].0 >= 764 && c["73 right before 64"].1 == 0, "{c:?}");
+        assert!(fvf_ok > 3000 && fvf_bad == 0, "{fvf_ok} {fvf_bad}");
     }
 }
