@@ -10,7 +10,8 @@
 //!     0 indices u32 · 12 uv f32×2 · 5 specular u32 · 4 diffuse u32 · 3 normals f32×3 · 1 positions f32×3
 //!     · 15 / 18 / 21 texture sets 2 to 4, f32×2 (FVF + 0x100 each) · 73 lightmap coordinates f32×2
 //!     · 64 tangents f32×3 (× handedness)
-//!   · u8 1 · u32 0 · u8 1 · u32 0 · u8 1 · u32 0   (two index lists and a batch list, empty as in the landscape)
+//!   · u8 1 · u32 0 · u8 1 · u32 0 · u8 1 · u32 0   (unlit vertices and triangles, lightmap charts: empty as in the
+//!     landscape, or the game's element's own, see `charts`)
 //!   · u32 nodes · per node: f32 radius · f32 centre[3] · u32 first · u32 count   (a sphere tree in preorder: a leaf
 //!     has count 1, its triangles run from `first` to the next leaf's `first`; an inner node counts its subtree)
 //!   · u8 1 · u32 triangles · u32 triangle per slot
@@ -31,6 +32,8 @@ pub struct Part {
     pub specular: Vec<u32>,
     /// Further coordinates per vertex by stream type (`g3_res::UV_EXTRA`: 15, 18, 21 texture sets 2 to 4, 73 lightmap).
     pub extra: Vec<(u32, Vec<[f32; 2]>)>,
+    /// The element's unlit lists and lightmap charts as stored (`charts`); empty: none.
+    pub tail: Vec<u8>,
 }
 
 /// Default colours of a vertex nothing is known about: white, fully lit.
@@ -161,7 +164,7 @@ pub fn write(parts: &[Part]) -> Vec<u8> {
         head(&mut o, 1, nv); for x in &p.positions { v3(&mut o, *x); }
         if let Some(l) = lightmap { head(&mut o, 73, nv); for x in l { f(&mut o, x[0]); f(&mut o, x[1]); } }
         head(&mut o, 64, nv); for x in &tan { v3(&mut o, *x); }
-        for _ in 0..3 { o.push(1); u32_(&mut o, 0); }
+        if p.tail.is_empty() { for _ in 0..3 { o.push(1); u32_(&mut o, 0); } } else { o.extend(&p.tail); }
         u32_(&mut o, nodes.len() as u32);
         for (r, c, first, count) in &nodes { f(&mut o, *r); v3(&mut o, *c); u32_(&mut o, *first); u32_(&mut o, *count); }
         o.push(1);
@@ -201,6 +204,7 @@ mod tests {
                     diffuse: m.diffuse[r.clone()].to_vec(),
                     specular: m.specular[r.clone()].to_vec(),
                     extra: m.uv_extra.iter().filter(|(t, _)| m.element_streams[e].contains(t)).map(|(t, v)| (*t, v[r.clone()].to_vec())).collect(),
+                    tail: if lo == m.elements[e].0 && hi + 1 == m.elements[e].0 + m.elements[e].1 { m.element_tails[e].clone() } else { vec![] },
                 }
             }).collect();
             let bm = crate::g3_res::decode_xcmsh(&super::write(&parts)).unwrap_or_else(|e| panic!("{k}: {e:#}"));

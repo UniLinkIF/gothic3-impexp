@@ -29,6 +29,7 @@
 //!                                                           the static cells' and the landscape, meshes as OBJ
 //! ```
 
+mod charts;
 mod cook;
 mod dds;
 mod export;
@@ -42,6 +43,7 @@ mod mods;
 mod motion_write;
 mod nxs;
 mod placement;
+mod rebake;
 mod geom;
 mod glb;
 mod lightmap;

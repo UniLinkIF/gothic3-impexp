@@ -25,6 +25,11 @@
   shapes the world's entity for it has.
 - A mod volume that names its files by full paths, as the game's do, is still read as a mod when all its files are
   later than the game's (the newest file of the game's volumes, patches included, is from January 2008).
+- A changed part of a building lit by lightmap pages gets pages of its own instead of falling back to vertex
+  lighting: charts (planar groups of its triangles, with their lightmap coordinates) in the mesh, and in every
+  placement's lightmap a page per chart at that placement's texel size, its light taken from the old pages at the same
+  place. Unchanged parts now also keep the game's charts in the mesh, which the pages they keep belong to (the last
+  release wrote them without).
 - Import keeps the game's double-sided faces (a second face on the same three corners), which Blender's OBJ importer
   dropped.
 

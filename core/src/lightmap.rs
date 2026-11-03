@@ -7,13 +7,14 @@
 //! per mesh element:
 //!   01 03 00 01 · u32 n · n × u32 colour (ARGB) · u8 1 · u32 n · n × f32[3] light direction
 //!   · u16 pages · per page: 44 33 22 11 · u16 1 · u32 page number (0, 1, …) · u32 −1 · u32 −1 · u32 w · u32 h
-//!                            · u32 bytes · bytes (w·h ARGB texels, or none) · when there are texels: u32 m · m bytes
+//!                            · u32 bytes · bytes (w·h ARGB texels, or none) · when there are texels: u32 4·h · per row
+//!                              u16 first · u16 end of the texels it uses
 //! u8 0 · string table (the mesh path among the strings)
 //! ```
 //! Every one of the 11138 shipped files reads to its last byte so (see the test). `textured` is the placement's own
 //! setting, kept as it is: 1 also in files without pages. Three in four files have no pages (vertex lighting only); the rest light some elements by pages,
-//! whose texels follow the mesh's lightmap coordinates (vertex stream 73) — kept only while the element's vertices and
-//! triangles are the game's, in the game's order. The same mesh appears in the world with either form.
+//! page k for the element's chart k (see `charts`: which triangles, and the plane their coordinates, stream 73, are in).
+//! The same mesh appears in the world with either form.
 
 use anyhow::{bail, Result};
 

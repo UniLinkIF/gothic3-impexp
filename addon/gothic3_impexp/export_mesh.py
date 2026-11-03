@@ -371,6 +371,8 @@ class G3_OT_export_mesh(bpy.types.Operator):
             self.report({"INFO"}, f"дані для розміщення в редакторі світу: {side}")
         if r.get("pages_kept"):
             self.report({"INFO"}, f"сторінки лайтмап гри збережено для {r['pages_kept']} частин (форма та сама)")
+        if r.get("pages_rebaked"):
+            self.report({"INFO"}, f"нові сторінки лайтмап (світло перенесено зі старих) для {r['pages_rebaked']} змінених частин")
         self.report({"INFO"}, f"{self.name} ({what}): {r['vertices']} вершин, {r['triangles']} трикутників → {where}")
         return {"FINISHED"}
 

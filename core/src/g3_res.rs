@@ -45,8 +45,10 @@ fn resource_head(r: &mut Rd, class: &str) -> Result<()> {
 /// `uv_extra`: the further vertex coordinates by stream type, per vertex as `positions`: 15, 18, 21 the second to
 /// fourth texture coordinates (the element's FVF counts them: `0x100 × sets`; Varant's landscape has four, some
 /// buildings two), 73 the lightmap coordinates (texel space of the instance's lightmap pages; −1 where a vertex has
-/// none, and for elements without the stream). `element_streams`: the stream types of each element.
-pub struct G3Mesh { pub geo: crate::geom::MeshGeometry, pub streams: Vec<u32>, pub colors: bool, pub diffuse: Vec<u32>, pub specular: Vec<u32>, pub elements: Vec<(u32, u32)>, pub uv_extra: Vec<(u32, Vec<[f32; 2]>)>, pub element_streams: Vec<Vec<u32>> }
+/// none, and for elements without the stream). `element_streams`: the stream types of each element. `element_tails`: each
+/// element's unlit vertex and triangle lists and its lightmap charts as stored (`charts::parse`), for elements of
+/// version 3 on; empty for older ones.
+pub struct G3Mesh { pub geo: crate::geom::MeshGeometry, pub streams: Vec<u32>, pub colors: bool, pub diffuse: Vec<u32>, pub specular: Vec<u32>, pub elements: Vec<(u32, u32)>, pub uv_extra: Vec<(u32, Vec<[f32; 2]>)>, pub element_streams: Vec<Vec<u32>>, pub element_tails: Vec<Vec<u8>> }
 
 /// The extra coordinate streams, in the order `uv_extra` and the writer keep them.
 pub const UV_EXTRA: [u32; 4] = [15, 18, 21, 73];
@@ -70,7 +72,7 @@ pub fn decode_xcmsh(bytes: &[u8]) -> Result<G3Mesh> {
     let (mut diffuse, mut specular) = (vec![], vec![]);
     let mut ranges = vec![];
     let mut extra: Vec<(u32, Vec<[f32; 2]>)> = UV_EXTRA.iter().map(|&t| (t, vec![])).collect();
-    let mut element_streams = vec![];
+    let (mut element_streams, mut element_tails) = (vec![], vec![]);
     for _ in 0..elements {
         let ever = r.u16()?;
         r.u32()?;
@@ -101,8 +103,10 @@ pub fn decode_xcmsh(bytes: &[u8]) -> Result<G3Mesh> {
                 t => bail!("unknown vertex stream type {t}"),
             }
         }
+        let tail_at = r.p;
         if ever > 2 { for _ in 0..2 { r.u8()?; let n = r.u32()? as usize; r.skip(n * 4)?; } }
         if ever > 1 { r.u8()?; for _ in 0..r.u32()? { for _ in 0..2 { r.u8()?; let n = r.u32()? as usize; r.skip(n * 4)?; } r.skip(84)?; } }
+        element_tails.push(if ever > 2 { bytes[tail_at..r.p].to_vec() } else { vec![] });
         if ever > 3 { let n = r.u32()? as usize; r.skip(n * 24)?; r.u8()?; let n = r.u32()? as usize; r.skip(n * 4)?; }
         let nv = pos.len();
         if (!nrm.is_empty() && nrm.len() != nv) || (!uv.is_empty() && uv.len() != nv) { bail!("{material}: stream lengths differ ({nv} positions, {} normals, {} uvs)", nrm.len(), uv.len()); }
@@ -133,7 +137,7 @@ pub fn decode_xcmsh(bytes: &[u8]) -> Result<G3Mesh> {
     }
     let n = g.positions.len();
     let uv_extra = extra.into_iter().filter(|(_, v)| !v.is_empty()).map(|(t, mut v)| { v.resize(n, uv_default(t)); (t, v) }).collect();
-    Ok(G3Mesh { geo: g, streams, colors, diffuse, specular, elements: ranges, uv_extra, element_streams })
+    Ok(G3Mesh { geo: g, streams, colors, diffuse, specular, elements: ranges, uv_extra, element_streams, element_tails })
 }
 
 /// Strings of a `GENOMFLE` file's string table (u32 table offset at 10; at the table: u32 magic, u8, u32 count,

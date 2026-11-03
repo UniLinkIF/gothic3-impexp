@@ -108,7 +108,7 @@ pub struct FarSpec { pub geometry: String, pub corners: usize, pub materials: Ve
 pub struct Spec { pub name: String, pub geometry: String, pub corners: usize, pub materials: Vec<MatSpec>, pub collision: Option<CollisionSpec>, #[serde(default)] pub uv_extra: Vec<UvSpec>, #[serde(default)] pub lowpoly: Option<FarSpec> }
 
 #[derive(serde::Serialize, Default)]
-pub struct Report { pub name: String, pub replaced: bool, pub vertices: usize, pub triangles: usize, pub materials: Vec<String>, pub collision: Option<String>, pub convex: Option<String>, pub lightmaps: usize, pub pages_kept: usize, pub lods: Vec<String>, pub files: Vec<String>, pub warnings: Vec<String>, pub placement: serde_json::Value }
+pub struct Report { pub name: String, pub replaced: bool, pub vertices: usize, pub triangles: usize, pub materials: Vec<String>, pub collision: Option<String>, pub convex: Option<String>, pub lightmaps: usize, pub pages_kept: usize, pub pages_rebaked: usize, pub lods: Vec<String>, pub files: Vec<String>, pub warnings: Vec<String>, pub placement: serde_json::Value }
 
 /// Corner arrays: positions f32×3, normals f32×3, uvs f32×2 (V down), material u32 per triangle.
 fn read_geometry(path: &str, corners: usize) -> Result<(Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>)> {
@@ -210,10 +210,10 @@ fn shape_of(m: &MatSpec, default: u8) -> u8 {
 }
 
 /// Nearest point among some of `pts`, on a uniform grid.
-struct Nearest<'a> { pts: &'a [[f32; 3]], ids: Vec<u32>, cell: f32, grid: HashMap<[i32; 3], Vec<u32>>, lo: [i32; 3], hi: [i32; 3] }
+pub(crate) struct Nearest<'a> { pts: &'a [[f32; 3]], ids: Vec<u32>, cell: f32, grid: HashMap<[i32; 3], Vec<u32>>, lo: [i32; 3], hi: [i32; 3] }
 
 impl<'a> Nearest<'a> {
-    fn new(pts: &'a [[f32; 3]], ids: impl Iterator<Item = u32>) -> Self {
+    pub(crate) fn new(pts: &'a [[f32; 3]], ids: impl Iterator<Item = u32>) -> Self {
         let ids: Vec<u32> = ids.collect();
         let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
         for &i in &ids { let p = pts[i as usize]; for k in 0..3 { lo[k] = lo[k].min(p[k]); hi[k] = hi[k].max(p[k]); } }
@@ -226,7 +226,7 @@ impl<'a> Nearest<'a> {
     }
     fn key(p: [f32; 3], cell: f32) -> [i32; 3] { p.map(|x| (x / cell).floor() as i32) }
     fn dist(&self, i: u32, p: [f32; 3]) -> f32 { let q = self.pts[i as usize]; (0..3).map(|k| (q[k] - p[k]).powi(2)).sum() }
-    fn find(&self, p: [f32; 3]) -> Option<u32> {
+    pub(crate) fn find(&self, p: [f32; 3]) -> Option<u32> {
         if self.ids.is_empty() { return None; }
         let c = Self::key(p, self.cell);
         // Rings beyond this one hold no cell of the grid.
@@ -347,21 +347,35 @@ fn as_element(orig: &crate::g3_res::G3Mesh, e: usize, p: &crate::xcmsh_write::Pa
         diffuse: orig.diffuse[first..first + n].to_vec(),
         specular: orig.specular[first..first + n].to_vec(),
         extra,
+        // Its lightmap charts: which triangles each page of the lightmaps lights.
+        tail: orig.element_tails[e].clone(),
     })
 }
 
 /// Lightmaps of `orig` (at archive path `tpath`) written again for `near` (new vertex → original vertex). A part that
 /// is an element of the original again (`kept`) keeps that element's lighting as it is, pages and all; the others are
 /// lit per vertex from the nearest original vertex.
-fn lightmaps(g: &G3Ctx, orig: &crate::g3_res::G3Mesh, tpath: &str, near: &[Vec<u32>], kept: &[Option<usize>], r: &mut Report, files: &mut Vec<(String, String, Vec<u8>)>) -> Result<()> {
+/// The lightmaps (one per placement) of the mesh at archive path `tpath`: (key, bytes).
+fn lightmaps_of(g: &G3Ctx, tpath: &str) -> Result<Vec<(String, Vec<u8>)>> {
     let stem = tpath.rsplit('/').next().unwrap().trim_end_matches(".xcmsh").to_lowercase();
     let want = format!("/data/_compiledmesh/{}", tpath.to_lowercase());
     let pre = format!("lightmaps/{stem}_{{");
-    let mut paged = vec![];
+    let mut out = vec![];
     for lk in g.keys().into_iter().filter(|k| k.starts_with(&pre)) {
         let d = g.read(&lk)?;
-        if crate::lightmap::mesh_path(&d).as_deref() != Some(want.as_str()) { continue; }
+        if crate::lightmap::mesh_path(&d).as_deref() == Some(want.as_str()) { out.push((lk, d)); }
+    }
+    Ok(out)
+}
+
+fn lightmaps(g: &G3Ctx, orig: &crate::g3_res::G3Mesh, tpath: &str, parts: &[crate::xcmsh_write::Part], near: &[Vec<u32>], kept: &[Option<usize>], charts: &[Option<crate::charts::Tail>], r: &mut Report, files: &mut Vec<(String, String, Vec<u8>)>) -> Result<()> {
+    let mut paged = vec![];
+    let orig_tails: Vec<Option<crate::charts::Tail>> = orig.element_tails.iter().map(|t| crate::charts::parse(t).ok()).collect();
+    for (lk, d) in lightmaps_of(g, tpath)? {
         let lm = crate::lightmap::parse(&d).with_context(|| lk.clone())?;
+        // A placement lit by pages: its texel size and lit texels, for the changed parts' new pages.
+        let size = (0..lm.count).any(|e| lm.has_pages(e)).then(|| crate::rebake::texel_size(&orig_tails, &lm)).flatten();
+        let old = size.map(|_| crate::rebake::old_texels(orig, &orig_tails, &lm));
         // Original vertex → (colour, direction), where the lightmap's element matches the mesh's.
         let mut light: Vec<Option<(u32, [f32; 3])>> = vec![None; orig.geo.positions.len()];
         for (e, (cols, dirs)) in lm.elements.iter().enumerate() {
@@ -380,10 +394,15 @@ fn lightmaps(g: &G3Ctx, orig: &crate::g3_res::G3Mesh, tpath: &str, near: &[Vec<u
                 continue;
             }
             let v: Vec<(u32, [f32; 3])> = n.iter().map(|&i| light[i as usize].or(any).unwrap_or((0xff80_8080, [0.0, 1.0, 0.0]))).collect();
-            elements.push((v.iter().map(|x| x.0).collect(), v.iter().map(|x| x.1).collect()));
-            pages.push(crate::lightmap::NONE.to_vec());
+            let cols: Vec<u32> = v.iter().map(|x| x.0).collect();
+            match (charts.get(i).and_then(Option::as_ref), size, &old) {
+                (Some(tail), Some(s), Some(old)) => { pages.push(crate::rebake::pages(&parts[i], tail, s, old, &cols)); r.pages_rebaked += 1; }
+                _ => pages.push(crate::lightmap::NONE.to_vec()),
+            }
+            elements.push((cols, v.iter().map(|x| x.1).collect()));
         }
-        for e in 0..lm.count { if lm.has_pages(e) && !kept.contains(&Some(e)) { lost += 1; } }
+        // Pages of the game's that went neither kept nor made anew.
+        if size.is_none() || charts.iter().all(Option::is_none) { for e in 0..lm.count { if lm.has_pages(e) && !kept.contains(&Some(e)) { lost += 1; } } }
         let path = g.path_of(&lk).unwrap_or(&lk).to_string();
         if lost > 0 { paged.push(path.clone()); }
         files.push(("Lightmaps".to_string(), path, crate::lightmap::write(&lm, &elements, &pages)));
@@ -435,7 +454,7 @@ fn parts_of(geometry: &str, corners: usize, uv_extra: &[UvSpec], mat_names: &[St
     }
     extra_in.sort_by_key(|x| x.0);
     extra_in.dedup_by_key(|x| x.0);
-    let mut parts: Vec<crate::xcmsh_write::Part> = mat_names.iter().map(|m| crate::xcmsh_write::Part { material: m.clone(), positions: vec![], normals: vec![], uvs: vec![], triangles: vec![], diffuse: vec![], specular: vec![], extra: extra_in.iter().map(|(t, _)| (*t, vec![])).collect() }).collect();
+    let mut parts: Vec<crate::xcmsh_write::Part> = mat_names.iter().map(|m| crate::xcmsh_write::Part { material: m.clone(), positions: vec![], normals: vec![], uvs: vec![], triangles: vec![], diffuse: vec![], specular: vec![], extra: extra_in.iter().map(|(t, _)| (*t, vec![])).collect(), tail: vec![] }).collect();
     let mut seen: Vec<HashMap<Vec<u32>, u32>> = vec![HashMap::new(); parts.len()];
     for t in 0..corners / 3 {
         let mi = (tri_mat[t] as usize).min(parts.len() - 1);
@@ -500,7 +519,7 @@ pub fn build(g: &G3Ctx, spec: &Spec) -> Result<(Report, Vec<(String, String, Vec
     }
     for (key, tpath, is_far) in &targets {
         let src = if *is_far { far.as_ref().unwrap() } else { &parts };
-        let mut tparts: Vec<crate::xcmsh_write::Part> = src.iter().map(|p| crate::xcmsh_write::Part { material: p.material.clone(), positions: p.positions.clone(), normals: p.normals.clone(), uvs: p.uvs.clone(), triangles: p.triangles.clone(), diffuse: vec![], specular: vec![], extra: p.extra.clone() }).collect();
+        let mut tparts: Vec<crate::xcmsh_write::Part> = src.iter().map(|p| crate::xcmsh_write::Part { material: p.material.clone(), positions: p.positions.clone(), normals: p.normals.clone(), uvs: p.uvs.clone(), triangles: p.triangles.clone(), diffuse: vec![], specular: vec![], extra: p.extra.clone(), tail: vec![] }).collect();
         let orig = match key { Some(k) => Some(crate::g3_res::decode_xcmsh(&g.read(k)?).with_context(|| format!("{k}: the mesh it replaces"))?), None => None };
         if let Some(o) = &orig {
             // Parts that are elements of the original again take its order, so its lightmap pages stay theirs.
@@ -509,13 +528,24 @@ pub fn build(g: &G3Ctx, spec: &Spec) -> Result<(Report, Vec<(String, String, Vec
                 let found = std::iter::once(i).chain(0..o.elements.len()).filter(|e| !kept.contains(&Some(*e))).find_map(|e| as_element(o, e, p).map(|x| (e, x)));
                 if let Some((e, same)) = found { *p = same; kept[i] = Some(e); }
             }
+            // Changed parts, where a placement lit the old shape by pages, get charts of their own and new pages.
+            let paged = lightmaps_of(g, tpath)?.iter().any(|(_, d)| crate::lightmap::parse(d).is_ok_and(|l| (0..l.count).any(|e| l.has_pages(e))));
+            let mut charts: Vec<Option<crate::charts::Tail>> = vec![None; tparts.len()];
+            if paged {
+                for (i, p) in tparts.iter_mut().enumerate() {
+                    if kept[i].is_some() { continue; }
+                    let t = crate::rebake::make_charts(p);
+                    p.tail = crate::charts::write(&t);
+                    charts[i] = Some(t);
+                }
+            }
             let mut near = nearest_original(o, &tparts);
             for (i, (p, n)) in tparts.iter_mut().zip(near.iter_mut()).enumerate() {
                 if let Some(e) = kept[i] { let first = o.elements[e].0; *n = (first..first + p.positions.len() as u32).collect(); continue; }
                 p.diffuse = n.iter().map(|&i| o.diffuse[i as usize]).collect();
                 p.specular = n.iter().map(|&i| o.specular[i as usize]).collect();
             }
-            lightmaps(g, o, tpath, &near, &kept, &mut r, &mut files)?;
+            lightmaps(g, o, tpath, &tparts, &near, &kept, &charts, &mut r, &mut files)?;
         }
         files.push(("_compiledMesh".to_string(), tpath.clone(), crate::xcmsh_write::write(&tparts)));
     }
@@ -824,9 +854,9 @@ mod tests {
     }
 
     /// A building lit by lightmap pages, written back from its own triangles (as the add-on sends them, in Blender's
-    /// order): its elements take the game's vertex and triangle order again, and every lightmap of it comes out as the
-    /// game's, byte for byte, pages and all. With one vertex moved, that element is lit per vertex, the others keep
-    /// their pages.
+    /// order): its elements take the game's vertex and triangle order and charts again, and every lightmap of it comes
+    /// out as the game's, byte for byte, pages and all. With one vertex moved, that element gets charts and pages of its
+    /// own, lit from the game's pages: on the triangles that did not move, the new pages show what the old ones did.
     #[test]
     fn a_building_replaced_by_itself_keeps_its_lightmap_pages() {
         let Ok(root) = std::env::var("G3_GAME") else { return };
@@ -839,6 +869,7 @@ mod tests {
         let ours = crate::g3_res::decode_xcmsh(&files.iter().find(|f| f.1.eq_ignore_ascii_case(g.path_of(&key).unwrap())).unwrap().2).unwrap();
         assert_eq!(ours.elements, game.elements);
         assert_eq!(ours.geo.indices, game.geo.indices);
+        assert!(ours.element_tails == game.element_tails, "the charts are the game's");
         let lm73 = |m: &crate::g3_res::G3Mesh| m.uv_extra.iter().find(|x| x.0 == 73).map(|x| x.1.clone());
         assert!(lm73(&game).is_some() && lm73(&ours) == lm73(&game));
         let lights: Vec<&(String, String, Vec<u8>)> = files.iter().filter(|f| f.0 == "Lightmaps").collect();
@@ -855,9 +886,48 @@ mod tests {
         for c in 0..spec.corners { if geo[at(c, 0)..at(c, 0) + 12] == first { let y = f32::from_le_bytes(geo[at(c, 1)..at(c, 1) + 4].try_into().unwrap()) + 10.0; geo[at(c, 1)..at(c, 1) + 4].copy_from_slice(&y.to_le_bytes()); } }
         std::fs::write(&spec.geometry, geo).unwrap();
         let (r2, files2) = build(&g, &spec).unwrap();
-        let l = crate::lightmap::parse(&files2.iter().find(|f| f.0 == "Lightmaps" && { let x = crate::lightmap::parse(&f.2).unwrap(); x.count > 1 }).unwrap().2).unwrap();
-        assert!(!l.has_pages(0), "the moved element is lit per vertex");
-        assert!(r2.pages_kept < r.pages_kept && r2.warnings.iter().any(|w| w.contains("lit per vertex")), "{} {:?}", r2.pages_kept, r2.warnings);
+        assert!(r2.pages_kept < r.pages_kept && r2.pages_rebaked > 0 && !r2.warnings.iter().any(|w| w.contains("lit per vertex")), "{} {} {:?}", r2.pages_kept, r2.pages_rebaked, r2.warnings);
+        let new = crate::g3_res::decode_xcmsh(&files2.iter().find(|f| f.1.eq_ignore_ascii_case(g.path_of(&key).unwrap())).unwrap().2).unwrap();
+        let tails = |m: &crate::g3_res::G3Mesh| -> Vec<Option<crate::charts::Tail>> { m.element_tails.iter().map(|t| crate::charts::parse(t).ok()).collect() };
+        let (nt, gt) = (tails(&new), tails(&game));
+        let charts = nt[0].as_ref().expect("charts of its own");
+        let l73 = lm73(&new).unwrap();
+        for c in &charts.charts { for &v in &c.vertices { let (uv, q) = (c.uv(new.geo.positions[v as usize]), l73[v as usize]); assert!((uv[0] - q[0]).abs() < 0.05 && (uv[1] - q[1]).abs() < 0.05, "{uv:?} {q:?}"); } }
+        // The colour a triangle's middle has in a placement's pages.
+        let shade = |m: &crate::g3_res::G3Mesh, t: &[Option<crate::charts::Tail>], l: &crate::lightmap::Lightmap, e: usize, tri: usize| -> Option<[f32; 3]> {
+            let c = t[e].as_ref()?.charts.iter().position(|c| c.triangles.contains(&(tri as u32)))?;
+            let (w, h, px, _) = crate::rebake::read_pages(&l.pages[e]).into_iter().nth(c)?;
+            if px.is_empty() { return None; }
+            let s = &m.geo.submeshes[e];
+            let p = [0, 1, 2].map(|k| m.geo.indices[s.first_index as usize + tri * 3 + k]).map(|i| m.geo.positions[i as usize]);
+            let mid = [0, 1, 2].map(|k| (p[0][k] + p[1][k] + p[2][k]) / 3.0);
+            let ch = &t[e].as_ref()?.charts[c];
+            let uv = ch.uv(mid);
+            let (i, j) = ((1.0 + uv[0] / ch.max[0].max(1e-3) * (w as f32 - 2.0)) as usize, (1.0 + uv[1] / ch.max[1].max(1e-3) * (h as f32 - 2.0)) as usize);
+            let x = px[j.min(h - 1) * w + i.min(w - 1)];
+            Some([(x >> 16 & 255) as f32, (x >> 8 & 255) as f32, (x & 255) as f32])
+        };
+        let moved: [f32; 3] = [0, 1, 2].map(|k| f32::from_le_bytes(first[k * 4..k * 4 + 4].try_into().unwrap()));
+        let (mut sum, mut n, mut base) = (0f32, 0, 0f32);
+        for f in files2.iter().filter(|f| f.0 == "Lightmaps") {
+            let ln = crate::lightmap::parse(&f.2).unwrap();
+            let lg = crate::lightmap::parse(&g.read(&format!("lightmaps/{}", f.1.to_lowercase())).unwrap()).unwrap();
+            if !lg.has_pages(0) { continue; }
+            assert!(ln.has_pages(0) && crate::rebake::read_pages(&ln.pages[0]).len() == charts.charts.len(), "{}: a page per chart", f.1);
+            for tri in (0..game.geo.submeshes[0].index_count as usize / 3).step_by(7) {
+                let s = &game.geo.submeshes[0];
+                let far = (0..3).all(|k| { let q = game.geo.positions[game.geo.indices[s.first_index as usize + tri * 3 + k] as usize]; (0..3).map(|a| (q[a] - moved[a]).powi(2)).sum::<f32>() > 200.0 * 200.0 });
+                if let (true, Some(a), Some(b)) = (far, shade(&game, &gt, &lg, 0, tri), shade(&new, &nt, &ln, 0, tri)) {
+                    sum += (0..3).map(|k| (a[k] - b[k]).abs()).sum::<f32>() / 3.0;
+                    n += 1;
+                    // Against another triangle's light: what an unrelated colour differs by.
+                    let other = (tri + 101) % (s.index_count as usize / 3);
+                    if let Some(c) = shade(&new, &nt, &ln, 0, other) { base += (0..3).map(|k| (a[k] - c[k]).abs()).sum::<f32>() / 3.0; }
+                }
+            }
+        }
+        eprintln!("rebaked: {n} triangle middles, mean |Δ| {:.2} of 255 (another triangle's: {:.2})", sum / n.max(1) as f32, base / n.max(1) as f32);
+        assert!(n > 100 && sum / (n as f32) < 12.0 && sum * 3.0 < base, "{n} triangles, mean |Δ| {} (another's {})", sum / n.max(1) as f32, base / n.max(1) as f32);
         std::fs::remove_dir_all(&dir).ok();
     }
 
