@@ -21,6 +21,11 @@
 - **Export → Gothic 3 Lip-sync → Mod**: a face action back to a line's `.xlip` (`Speech_<Language>`): at every key the
   nearest of the head's poses. The writer gives every one of the game's 24 241 `.xlip` back to the byte (the German
   patch's three in their plain form too).
+- Motion export **from the game's words**: a new clip's name is picked from lists of the words Gothic 3 makes clip names
+  of (stance, left and right hand, pose, action, phase, N/O/I, direction, variant; read from the tables Game.dll and
+  Script.dll fill at start-up), the actor and the clip's own part after `%` from the template. The free name field is
+  gone: a name the game never composes cannot be typed. Every clip the game ships is named from those tables, but for
+  about a hundred whose words no code of the game holds (the composer never makes them).
 - Motion export **as a new variant** of the clip's action: the next free variant number (the wolf's ambient loops
   01–05 → 06), named the way the game composes clip names. The report says what the game makes of a new name: a
   variant, words the game never composes, or a name it does not look up.

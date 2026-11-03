@@ -222,11 +222,20 @@ try:
             seen["spec"] = json.load(open(args[1], encoding="utf-8"))
         return out
     core.run = spy_m
-    r = bpy.ops.gothic3.export_motion(clip="Wolf_Stand_None_None_P0_Ambient_Loop_N_Fwd_02_%_00_P0_0", new_variant=True, mode="package", folder=os.path.join(OUT, "wolf_variant"), title="Wolf variant (test)")
+    r = bpy.ops.gothic3.export_motion(clip="Wolf_Stand_None_None_P0_Ambient_Loop_N_Fwd_02_%_00_P0_0", target="variant", mode="package", folder=os.path.join(OUT, "wolf_variant"), title="Wolf variant (test)")
     core.run = orig
     rep = seen.get("out", {}).get("report", {})
     check(r1 == {"FINISHED"} and r == {"FINISHED"} and rep.get("new") and rep.get("clip") == "Wolf_Stand_None_None_P0_Ambient_Loop_N_Fwd_06_%_00_P0_0" and rep.get("template", "").endswith("_02_%_00_P0_0"),
           f"motion as a new variant: {rep.get('clip')} ({rep.get('note')})")
+    # 8c. A new clip named from the game's words only: the lists hold the game's words; a dance for the wolf.
+    from gothic3_impexp import export_motion
+    items = [i[0] for i in export_motion._word_items("action")(None, None)]
+    seen.clear()
+    core.run = spy_m
+    r = bpy.ops.gothic3.export_motion(clip="Wolf_Stand_None_None_P0_Ambient_Loop_N_Fwd_02_%_00_P0_0", target="words", stance="Stand", left="None", right="None", pose="P0", action_word="Dance", phase="Loop", nio="N", direction="Fwd", variant=1, mode="package", folder=os.path.join(OUT, "wolf_dance"), title="Wolf dance (test)")
+    core.run = orig
+    rep = seen.get("out", {}).get("report", {})
+    check(r == {"FINISHED"} and "Dance" in items and "Breakdance" not in items and len(items) > 100 and rep.get("clip") == "Wolf_Stand_None_None_P0_Dance_Loop_N_Fwd_01_%_00_P0_0", f"motion from the game's words: {rep.get('clip')} ({len(items)} actions)")
 
     # 9. Terrain: two neighbouring cells in as one welded mesh; back unchanged, nothing is written; a hill raised in
     #    the middle of one, only that cell comes back (mesh, collision, lightmap).

@@ -172,6 +172,19 @@ mod tests {
         assert_eq!((w.existing.len(), w.next.as_str()), (5, "Wolf_Stand_None_None_P0_Ambient_Ambient_N_Fwd_05_%_04_P0_0"));
         assert!(w.note.contains("never pick a 05"), "{}", w.note);
         assert!(variants(&g, "G3_Door_01_Open").is_err());
+        // A name made of words: the template's actor and part from %, the words checked.
+        let dir = std::env::temp_dir().join(format!("g3ie_test_compose_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = "Wolf_Stand_None_None_P0_Ambient_Loop_N_Fwd_02_%_00_P0_0";
+        let m = crate::g3_motion::decode_xmot(&g.read(&g.find("_compiledanimation", &format!("{clip}.xmot")).unwrap()).unwrap()).unwrap();
+        let a = crate::g3_actor::decode_xact(&g.read("_compiledanimation/g3_wolf_body_01.xact").unwrap()).unwrap();
+        let (glb, _) = crate::glb::build("wolf", &a, &[(clip.to_string(), m)], false, &mut |_: &str, _: bool| Ok(None)).unwrap();
+        std::fs::write(dir.join("w.glb"), glb).unwrap();
+        let spec = |words: [&str; 8]| MotionSpec { clip: clip.into(), glb: dir.join("w.glb").to_string_lossy().into_owned(), as_name: Some("ignored".into()), effects: None, variant: false, compose: Some(Compose { words: words.map(String::from), variant: 1 }) };
+        let (r, _) = build(&g, &spec(["Stand", "None", "None", "P0", "Dance", "Loop", "N", "Fwd"])).unwrap();
+        assert_eq!(r.clip, "Wolf_Stand_None_None_P0_Dance_Loop_N_Fwd_01_%_00_P0_0");
+        assert!(build(&g, &spec(["Stand", "None", "None", "P0", "Breakdance", "Loop", "N", "Fwd"])).is_err());
+        std::fs::remove_dir_all(&dir).ok();
         assert_eq!(variant_of("Hero_Stand_None_None_P0_Ambient_Loop_N_Fwd_01_%_00_P0_0"), Some(("Hero_Stand_None_None_P0_Ambient_Loop_N_Fwd".into(), 1, "%_00_P0_0".into())));
     }
 }
@@ -212,9 +225,14 @@ pub fn keys_from_glb(glb: &[u8]) -> Result<(String, HashMap<String, Keys>, f32)>
 
 /// What the add-on asks for: the game clip that is the template (and is replaced unless `as_name` is given), the glb, and
 /// optionally new frame effects (time s, name).
-/// `variant`: the clip goes in as the next free variant of the template's action (`as_name` is then not used).
+/// `variant`: the clip goes in as the next free variant of the template's action; `compose`: under a name made of the
+/// game's words (the actor and the clip's own part from `%` are the template's). Either way `as_name` is not used.
 #[derive(serde::Deserialize)]
-pub struct MotionSpec { pub clip: String, pub glb: String, #[serde(default)] pub as_name: Option<String>, #[serde(default)] pub effects: Option<Vec<(f32, String)>>, #[serde(default)] pub variant: bool }
+pub struct MotionSpec { pub clip: String, pub glb: String, #[serde(default)] pub as_name: Option<String>, #[serde(default)] pub effects: Option<Vec<(f32, String)>>, #[serde(default)] pub variant: bool, #[serde(default)] pub compose: Option<Compose> }
+
+/// The eight table words (stance, left, right, pose, action, phase, N/O/I, direction) and the variant number.
+#[derive(serde::Deserialize)]
+pub struct Compose { pub words: [String; 8], pub variant: u32 }
 
 #[derive(serde::Serialize)]
 pub struct Report { pub clip: String, pub template: String, pub new: bool, pub bones: usize, pub keys: usize, pub duration: f32, pub effects: usize, pub path: String, pub note: Option<String> }
@@ -265,7 +283,14 @@ pub fn build(g: &crate::g3::G3Ctx, spec: &MotionSpec) -> Result<(Report, (String
     if bones == 0 { bail!("none of the clip's bones is in the exported animation — is it the right armature?"); }
     let template_path = g.path_of(&key).unwrap_or(&key).to_string();
     let variant = if spec.variant { Some(variants(g, clip)?) } else { None };
-    let as_name = match &variant { Some(v) => Some(v.next.clone()), None => spec.as_name.clone() };
+    let composed = match &spec.compose {
+        Some(c) => {
+            let (actor, _, _, tail) = crate::clip_words::split(&crate::stem_of(&template_path)).with_context(|| format!("{}: not named the way the game composes clip names", crate::stem_of(&template_path)))?;
+            Some(crate::clip_words::compose(&actor, &c.words, c.variant, &tail)?)
+        }
+        None => None,
+    };
+    let as_name = match (&variant, &composed) { (Some(v), _) => Some(v.next.clone()), (None, Some(c)) => Some(c.clone()), _ => spec.as_name.clone() };
     let new = as_name.as_deref().filter(|n| !n.is_empty() && !n.eq_ignore_ascii_case(&crate::stem_of(&template_path)));
     if let Some(n) = new { if !n.chars().all(|c| c.is_ascii_alphanumeric() || "_%-".contains(c)) { bail!("clip name {n:?}: letters, digits, _ % - only"); } }
     let path = match new { Some(n) => format!("{n}.xmot"), None => template_path.clone() };
@@ -274,6 +299,7 @@ pub fn build(g: &crate::g3::G3Ctx, spec: &MotionSpec) -> Result<(Report, (String
     let note = match (new, variant) {
         (None, _) => None,
         (Some(_), Some(v)) => Some(v.note),
+        (Some(_), None) if composed.is_some() => Some("made of the game's own words: the game plays it when a character is in that state".to_string()),
         (Some(n), None) => Some(match variant_of(n) {
             None => "the game looks clips up by the name it composes (<actor>_<stance>_…_<variant>_%_…); one named otherwise plays only where something names it".to_string(),
             Some((pre, v, _)) => {

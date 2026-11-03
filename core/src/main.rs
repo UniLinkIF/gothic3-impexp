@@ -27,6 +27,7 @@
 //! gothic3-core world <game> <layer> <radius cm> <out dir> [noground] [notrees]
 //!                                                           a layer as context: its placements and, within the radius,
 //!                                                           the static cells' and the landscape, meshes as OBJ
+//! gothic3-core clip-words                                  the words clip names are made of, per field (Game.dll, Script.dll)
 //! gothic3-core clip-variants <game> <clip>                the game's variants of the clip's action, the next free name
 //! gothic3-core lip-lines <game> [language]                the voice lines with a lip-sync timeline
 //! gothic3-core lipsync <game> <head> <line> <language> <out dir>
@@ -42,6 +43,7 @@
 //!                                                           the edited cells back (unchanged ones are left out)
 //! ```
 
+mod clip_words;
 mod cook;
 mod dds;
 mod export;
@@ -222,6 +224,7 @@ fn run(args: &[String]) -> Result<serde_json::Value> {
             let flags = &args[args.len().min(6)..];
             world::area_obj(&g, a(3).context("world layer")?, radius, !flags.iter().any(|f| f == "noground"), !flags.iter().any(|f| f == "notrees"), Path::new(a(5).context("out dir")?))?
         }
+        (Some("clip-words"), _) => clip_words::words(),
         (Some("clip-variants"), Some(game)) => serde_json::to_value(motion_write::variants(&g3::G3Ctx::open_original(Path::new(game))?, a(3).context("clip")?)?)?,
         (Some("lip-lines"), Some(game)) => serde_json::to_value(lipsync::lines(Path::new(game), a(3).unwrap_or("English"))?)?,
         (Some("lipsync"), Some(game)) => {
