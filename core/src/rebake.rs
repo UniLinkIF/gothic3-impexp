@@ -4,8 +4,10 @@
 //! old per-vertex light. The game is not asked to bake anything.
 //!
 //! Texel (i, j) of a page `w` × `h` stands for (u, v) = ((i + ½ − 1) / (w − 2) · u_max, (j + ½ − 1) / (h − 2) · v_max)
-//! — one texel of border, the chart's stored maximum filling the rest; per row the span of texels the chart's
-//! triangles touch, grown by one texel all round (what most of the game's spans are, see the test).
+//! — one texel of border, the chart's stored maximum filling the rest. A texel the chart's triangles touch, grown by one
+//! all round, is lit (alpha 255; 96 % of the texels the game lights for its own charts), the rest 0, and each row's span
+//! is the extent of its lit texels, as in the game's pages. Instead of the old light, the light can come baked in
+//! Blender (`Baked`).
 
 use crate::charts::{Chart, Tail};
 use crate::xcmsh_write::Part;
@@ -187,6 +189,8 @@ pub fn old_texels(orig: &crate::g3_res::G3Mesh, tails: &[Option<Tail>], lm: &cra
             for j in 0..h {
                 let (a, b) = spans.get(j).map_or((0, w), |s| (s.0 as usize, (s.1 as usize).min(w)));
                 for i in a..b {
+                    // Inside a row's span too a texel may be unlit (alpha 0).
+                    if px[j * w + i] >> 24 == 0 { continue; }
                     o.points.push(point(c, texel_uv(c, w, h, i, j), on));
                     o.normals.push(c.normal);
                     o.colours.push(px[j * w + i]);
@@ -210,11 +214,58 @@ fn tri_box(t: [[f32; 2]; 3], lo: [f32; 2], hi: [f32; 2]) -> bool {
     true
 }
 
-/// The pages (as stored, from the u16 count on) of part `p` with charts `tail`, at texel size `s`, lit from `old`
-/// (or, where it has nothing facing that way, `fallback`: a colour per vertex of `p`). Without old texels the pages
-/// carry none, as the game's own pages without texels do.
-pub fn pages(p: &Part, tail: &Tail, s: f32, old: &OldTexels, fallback: &[u32]) -> Vec<u8> {
+/// The stream a part carries its corners' places in a baked picture in (not written to the mesh).
+pub const BAKE_UV: u32 = 999;
+
+/// Light baked in Blender for the parts: an RGBA picture and, per vertex of a part, its place in it (stream
+/// [`BAKE_UV`], Blender's UV: v up).
+pub struct Baked { pub image: image::RgbaImage }
+
+impl Baked {
+    /// Bilinear colour at Blender UV `uv`, as a texel (ARGB, lit).
+    fn sample(&self, uv: [f32; 2]) -> u32 {
+        let (w, h) = (self.image.width() as f32, self.image.height() as f32);
+        let (x, y) = ((uv[0] * w - 0.5).clamp(0.0, w - 1.0), ((1.0 - uv[1]) * h - 0.5).clamp(0.0, h - 1.0));
+        let (x0, y0) = (x.floor() as u32, y.floor() as u32);
+        let (x1, y1) = ((x0 + 1).min(w as u32 - 1), (y0 + 1).min(h as u32 - 1));
+        let (fx, fy) = (x - x0 as f32, y - y0 as f32);
+        let px = |x: u32, y: u32, k: usize| self.image.get_pixel(x, y).0[k] as f32;
+        let c = [0, 1, 2].map(|k| (px(x0, y0, k) * (1.0 - fx) + px(x1, y0, k) * fx) * (1.0 - fy) + (px(x0, y1, k) * (1.0 - fx) + px(x1, y1, k) * fx) * fy);
+        0xff00_0000 | (c[0].round() as u32) << 16 | (c[1].round() as u32) << 8 | c[2].round() as u32
+    }
+}
+
+/// Where the point (u, v) of a chart lies on its triangles: the triangle and barycentric weights (clamped onto the
+/// nearest triangle for a texel of the border around them).
+fn locate(tris: &[[[f32; 2]; 3]], q: [f32; 2]) -> Option<(usize, [f32; 3])> {
+    let mut best: Option<(f32, usize, [f32; 3])> = None;
+    for (t, [a, b, c]) in tris.iter().enumerate() {
+        let d = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]);
+        if d.abs() < 1e-12 { continue; }
+        let l0 = ((b[1] - c[1]) * (q[0] - c[0]) + (c[0] - b[0]) * (q[1] - c[1])) / d;
+        let l1 = ((c[1] - a[1]) * (q[0] - c[0]) + (a[0] - c[0]) * (q[1] - c[1])) / d;
+        let l = [l0, l1, 1.0 - l0 - l1];
+        let out = l.iter().map(|x| (-x).max(0.0)).sum::<f32>();
+        if best.map_or(true, |b| out < b.0) {
+            let cl = l.map(|x| x.max(0.0));
+            let s: f32 = cl.iter().sum();
+            best = Some((out, t, cl.map(|x| x / s.max(1e-12))));
+        }
+        if out == 0.0 { break; }
+    }
+    best.map(|b| (b.1, b.2))
+}
+
+/// The pages (as stored, from the u16 count on) of part `p` with charts `tail`, at texel size `s`. A texel the chart's
+/// triangles touch (grown by one all round) is lit, alpha 255; the others are 0, as the game leaves them, and each row's
+/// span is the extent of its lit texels — what the game's spans are (all but 130 of its 1.9 million rows). The light
+/// comes from `baked` (Blender's bake, through the part's stream [`BAKE_UV`]) when given, else from `old` (the nearest
+/// old texel facing the same way) or, where it has nothing facing that way, `fallback` (a colour per vertex of `p`).
+/// Without either the pages carry no texels, as the game's own pages without texels do.
+pub fn pages(p: &Part, tail: &Tail, s: f32, old: &OldTexels, fallback: &[u32], baked: Option<&Baked>) -> Vec<u8> {
     let l73 = p.extra.iter().find(|x| x.0 == 73).map(|x| x.1.as_slice()).unwrap_or(&[]);
+    let bake_uv = p.extra.iter().find(|x| x.0 == BAKE_UV && x.1.len() == p.positions.len()).map(|x| x.1.as_slice());
+    let baked = baked.zip(bake_uv);
     // The old texels by the axis their chart faces most, and all of them.
     let axis = |n: [f32; 3]| { let k = (0..3).max_by(|&a, &b| n[a].abs().total_cmp(&n[b].abs())).unwrap(); k * 2 + (n[k] < 0.0) as usize };
     let all = crate::export::Nearest::new(&old.points, 0..old.points.len() as u32);
@@ -231,7 +282,7 @@ pub fn pages(p: &Part, tail: &Tail, s: f32, old: &OldTexels, fallback: &[u32]) -
         o.extend(u32::MAX.to_le_bytes());
         o.extend((w as u32).to_le_bytes());
         o.extend((h as u32).to_le_bytes());
-        if old.points.is_empty() { o.extend(0u32.to_le_bytes()); continue; }
+        if old.points.is_empty() && baked.is_none() { o.extend(0u32.to_le_bytes()); continue; }
         // Texels the chart's triangles touch, grown by one all round.
         let tris: Vec<[[f32; 2]; 3]> = c.triangles.iter().map(|&t| p.triangles[t as usize].map(|i| l73[i as usize])).collect();
         let (su, sv) = (c.max[0] / (w as f32 - 2.0), c.max[1] / (h as f32 - 2.0));
@@ -240,23 +291,33 @@ pub fn pages(p: &Part, tail: &Tail, s: f32, old: &OldTexels, fallback: &[u32]) -
             let lo = [(i as f32 - 1.0) * su, (j as f32 - 1.0) * sv];
             if tris.iter().any(|t| tri_box(*t, lo, [lo[0] + su, lo[1] + sv])) { hit[j * w + i] = true; }
         } }
-        let mut grown = hit.clone();
-        for j in 0..h { for i in 0..w { if hit[j * w + i] { for y in j.saturating_sub(1)..(j + 2).min(h) { for x in i.saturating_sub(1)..(i + 2).min(w) { grown[y * w + x] = true; } } } } }
+        let mut lit = hit.clone();
+        for j in 0..h { for i in 0..w { if hit[j * w + i] { for y in j.saturating_sub(1)..(j + 2).min(h) { for x in i.saturating_sub(1)..(i + 2).min(w) { lit[y * w + x] = true; } } } } }
         let on = p.positions[c.vertices[0] as usize];
         let ax = &by_axis[axis(c.normal)];
-        o.extend(((w * h * 4) as u32).to_le_bytes());
+        let mut px = vec![0u32; w * h];
         for j in 0..h { for i in 0..w {
-            let q = point(c, texel_uv(c, w, h, i, j), on);
-            let col = ax.find(q).filter(|&t| dot(old.normals[t as usize], c.normal) > 0.5)
-                .map(|t| old.colours[t as usize])
-                .or_else(|| verts.find(q).and_then(|v| fallback.get(v as usize).copied()))
-                .or_else(|| all.find(q).map(|t| old.colours[t as usize]))
-                .unwrap_or(0xff80_8080);
-            o.extend(col.to_le_bytes());
+            if !lit[j * w + i] { continue; }
+            let uv = texel_uv(c, w, h, i, j);
+            px[j * w + i] = 0xff00_0000 | 0x00ff_ffff & match baked {
+                Some((b, buv)) => match locate(&tris, uv) {
+                    Some((t, l)) => { let tri = p.triangles[c.triangles[t] as usize]; let q = [0, 1].map(|a| (0..3).map(|k| buv[tri[k] as usize][a] * l[k]).sum::<f32>()); b.sample(q) }
+                    None => 0x0080_8080,
+                },
+                None => {
+                    let q = point(c, uv, on);
+                    ax.find(q).filter(|&t| dot(old.normals[t as usize], c.normal) > 0.5).map(|t| old.colours[t as usize])
+                        .or_else(|| verts.find(q).and_then(|v| fallback.get(v as usize).copied()))
+                        .or_else(|| all.find(q).map(|t| old.colours[t as usize]))
+                        .unwrap_or(0xff80_8080)
+                }
+            };
         } }
+        o.extend(((w * h * 4) as u32).to_le_bytes());
+        for x in &px { o.extend(x.to_le_bytes()); }
         o.extend(((h * 4) as u32).to_le_bytes());
         for j in 0..h {
-            let row: Vec<usize> = (0..w).filter(|&i| grown[j * w + i]).collect();
+            let row: Vec<usize> = (0..w).filter(|&i| px[j * w + i] >> 24 != 0).collect();
             let (a, b) = row.first().zip(row.last()).map_or((0, 0), |(a, b)| (*a as u16, *b as u16 + 1));
             o.extend(a.to_le_bytes());
             o.extend(b.to_le_bytes());
@@ -267,13 +328,34 @@ pub fn pages(p: &Part, tail: &Tail, s: f32, old: &OldTexels, fallback: &[u32]) -
 
 #[cfg(test)]
 mod tests {
+    /// Every lightmap page of the game with texels: each row's span is the extent of the row's lit texels (alpha 255;
+    /// the others are 0 and black) — what the pages written here do by construction.
+    #[test]
+    fn the_games_spans_are_its_lit_texels() {
+        let Ok(root) = std::env::var("G3_GAME") else { return };
+        let g = crate::g3::G3Ctx::open(std::path::Path::new(&root)).unwrap();
+        let (mut rows, mut same, mut odd_alpha, mut dark_outside) = (0usize, 0usize, 0usize, 0usize);
+        for k in g.keys().into_iter().filter(|k| k.ends_with(".xlmp")) {
+            let lm = crate::lightmap::parse(&g.read(&k).unwrap()).unwrap();
+            for p in &lm.pages { for (w, h, px, spans) in super::read_pages(p) { if px.is_empty() { continue; } for j in 0..h {
+                let lit: Vec<usize> = (0..w).filter(|&i| px[j * w + i] >> 24 != 0).collect();
+                odd_alpha += (0..w).filter(|&i| ![0, 255].contains(&(px[j * w + i] >> 24))).count();
+                dark_outside += (0..w).filter(|&i| px[j * w + i] >> 24 == 0 && px[j * w + i] != 0).count();
+                rows += 1;
+                if spans[j] == lit.first().zip(lit.last()).map_or((0, 0), |(a, b)| (*a as u16, *b as u16 + 1)) { same += 1; }
+            } } }
+        }
+        eprintln!("{same} of {rows} rows: span = lit texels; other alphas {odd_alpha}, unlit texels not 0 {dark_outside}");
+        assert!(rows > 1_000_000 && (rows - same) * 10_000 <= rows && odd_alpha == 0 && dark_outside == 0);
+    }
+
     /// The game's own charts, given new pages here from the game's pages: the pages come out the size the game's are
     /// (the texel size read back from them), their spans mostly the game's, and their texels the game's light.
     #[test]
     fn pages_made_for_the_games_charts_are_the_games() {
         let Ok(root) = std::env::var("G3_GAME") else { return };
         let g = crate::g3::G3Ctx::open(std::path::Path::new(&root)).unwrap();
-        let (mut pages, mut sized, mut rows, mut same_rows, mut diff, mut texels, mut lms) = (0, 0, 0, 0, 0f64, 0, 0);
+        let (mut pages, mut sized, mut rows, mut same_rows, mut diff, mut texels, mut lms, mut lit_both, mut lit_any) = (0, 0, 0, 0, 0f64, 0, 0, 0, 0);
         for lk in g.keys().into_iter().filter(|k| k.ends_with(".xlmp")).step_by(3) {
             let d = g.read(&lk).unwrap();
             let lm = crate::lightmap::parse(&d).unwrap();
@@ -296,7 +378,7 @@ mod tests {
                     triangles: m.geo.indices[sm.first_index as usize..(sm.first_index + sm.index_count) as usize].chunks_exact(3).map(|c| [c[0], c[1], c[2]].map(|i| i - first as u32)).collect(),
                     diffuse: vec![], specular: vec![], extra: vec![(73, l73[first..first + n].to_vec())], tail: vec![],
                 };
-                let ours = super::read_pages(&super::pages(&part, t, s, &old, &[]));
+                let ours = super::read_pages(&super::pages(&part, t, s, &old, &[], None));
                 for (a, b) in ours.iter().zip(super::read_pages(&lm.pages[e])) {
                     pages += 1;
                     if (a.0, a.1) != (b.0, b.1) { continue; }
@@ -304,16 +386,20 @@ mod tests {
                     if b.2.is_empty() { continue; }
                     rows += b.1;
                     same_rows += a.3.iter().zip(&b.3).filter(|(x, y)| x == y).count();
-                    for j in 0..b.1 { let (lo, hi) = (b.3[j].0 as usize, (b.3[j].1 as usize).min(b.0)); for i in lo..hi {
-                        let (x, y) = (a.2[j * b.0 + i], b.2[j * b.0 + i]);
+                    // Our spans are the extent of our lit texels, as the game's are of its own.
+                    for j in 0..a.1 { let row: Vec<usize> = (0..a.0).filter(|&i| a.2[j * a.0 + i] >> 24 != 0).collect(); assert_eq!(a.3[j], row.first().zip(row.last()).map_or((0, 0), |(x, y)| (*x as u16, *y as u16 + 1))); }
+                    for (x, y) in a.2.iter().zip(&b.2) {
+                        lit_both += (x >> 24 != 0 && y >> 24 != 0) as usize;
+                        lit_any += (x >> 24 != 0 || y >> 24 != 0) as usize;
+                        if x >> 24 == 0 || y >> 24 == 0 { continue; }
                         diff += (0..3).map(|k| ((x >> (k * 8) & 255) as f64 - (y >> (k * 8) & 255) as f64).abs()).sum::<f64>() / 3.0;
                         texels += 1;
-                    } }
+                    }
                 }
             }
         }
-        eprintln!("{lms} lightmaps: {sized} of {pages} pages the game's size; spans {same_rows} of {rows} rows; texels mean |Δ| {:.2} over {texels}", diff / texels.max(1) as f64);
-        assert!(lms > 30 && sized * 100 >= pages * 99 && same_rows * 10 >= rows * 6 && diff / (texels as f64) < 4.0);
+        eprintln!("{lms} lightmaps: {sized} of {pages} pages the game's size; spans {same_rows} of {rows} rows; lit texels {lit_both} of {lit_any} lit by either; texels mean |Δ| {:.2} over {texels}", diff / texels.max(1) as f64);
+        assert!(lms > 30 && sized * 100 >= pages * 99 && same_rows * 10 >= rows * 6 && lit_both * 10 >= lit_any * 8 && diff / (texels as f64) < 4.0);
     }
 
     /// Charts made for a building's element: every triangle with area in one chart, the rest unlit; every chart

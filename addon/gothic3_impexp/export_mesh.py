@@ -17,7 +17,7 @@ import tempfile
 
 import bpy
 import numpy as np
-from bpy.props import EnumProperty, FloatProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 
 from . import core
 
@@ -257,6 +257,118 @@ def gather(context, objects, scale, tmp):
             np.concatenate(uv).astype(np.float32), np.concatenate(mat).astype(np.uint32), materials, sets)
 
 
+def _scene_has_light(scene):
+    """A lamp that renders, or a world whose background gives light."""
+    if any(o.type == "LIGHT" and not o.hide_render for o in scene.objects):
+        return True
+    w = scene.world
+    if w is None or not w.use_nodes:
+        return w is not None and any(c > 0.0 for c in w.color)
+    bg = next((n for n in w.node_tree.nodes if n.type == "BACKGROUND"), None)
+    if bg is None:
+        return False
+    col, strength = bg.inputs["Color"], bg.inputs["Strength"]
+    return strength.default_value > 0.0 and (col.is_linked or any(c > 0.0 for c in col.default_value[:3]))
+
+
+def bake_light(context, objects, tmp, size, samples):
+    """The scene's light on `objects`, baked by Cycles (diffuse lighting only: lamps, sky, bounces; no colour) into one
+    picture: copies of the objects get an atlas UV layer and are baked while the originals stay out of the render.
+    Returns the spec's `bake`: the picture, and per corner (in gather()'s order) its place in it. The scene, its
+    materials and the objects are left as they were."""
+    scene = context.scene
+    if not _scene_has_light(scene):
+        raise core.CoreError("Для запікання потрібне світло в сцені: лампа або небо (World) з силою > 0")
+    dg = context.evaluated_depsgraph_get()
+    copies, hidden, added, temp_mats = [], [], [], []
+    img = bpy.data.images.new("g3_bake", size, size, alpha=False)
+    engine, samples_before = scene.render.engine, getattr(scene.cycles, "samples", None)
+    selected, active = list(context.selected_objects), context.view_layer.objects.active
+    try:
+        for ob in objects:
+            me = bpy.data.meshes.new_from_object(ob.evaluated_get(dg))
+            cp = bpy.data.objects.new(f"{ob.name}_g3bake", me)
+            cp.matrix_world = ob.matrix_world
+            scene.collection.objects.link(cp)
+            copies.append((ob, cp))
+        for ob in objects:
+            if not ob.hide_render:
+                ob.hide_render = True
+                hidden.append(ob)
+        for o in context.selected_objects:
+            o.select_set(False)
+        for _, cp in copies:
+            cp.data.uv_layers.active = cp.data.uv_layers.new(name="G3_Bake")
+            cp.select_set(True)
+        context.view_layer.objects.active = copies[0][1]
+        bpy.ops.object.mode_set(mode="EDIT")
+        bpy.ops.mesh.select_all(action="SELECT")
+        bpy.ops.uv.lightmap_pack(PREF_CONTEXT="ALL_FACES", PREF_PACK_IN_ONE=True, PREF_NEW_UVLAYER=False, PREF_MARGIN_DIV=0.3)
+        bpy.ops.object.mode_set(mode="OBJECT")
+        # The picture as the bake target in every material of the copies (a stand-in where a slot has none).
+        for _, cp in copies:
+            if not cp.data.materials:
+                cp.data.materials.append(None)
+            for i, m in enumerate(cp.data.materials):
+                if m is None or not m.use_nodes:
+                    m = bpy.data.materials.new("g3_bake_stand_in")
+                    m.use_nodes = True
+                    temp_mats.append(m)
+                    cp.data.materials[i] = m
+                if any(a[0] is m for a in added):
+                    continue
+                n = m.node_tree.nodes.new("ShaderNodeTexImage")
+                n.image = img
+                added.append((m, n, m.node_tree.nodes.active))
+                m.node_tree.nodes.active = n
+        scene.render.engine = "CYCLES"
+        scene.cycles.samples = samples
+        bpy.ops.object.bake(type="DIFFUSE", pass_filter={"DIRECT", "INDIRECT"}, margin=4, use_clear=True)
+        path = os.path.join(tmp, "bake.png")
+        img.filepath_raw = path
+        img.file_format = "PNG"
+        img.save()
+        # Each corner's place, in the order gather() takes the corners (a mirrored object is turned the same way).
+        uvs = []
+        for ob, cp in copies:
+            me = cp.data
+            if ob.matrix_world.determinant() < 0:
+                me.flip_normals()
+            me.calc_loop_triangles()
+            nt = len(me.loop_triangles)
+            if nt == 0:
+                continue
+            loops = np.empty(nt * 3, np.int32)
+            me.loop_triangles.foreach_get("loops", loops)
+            uvs.append(_corner_uv(me, me.uv_layers["G3_Bake"])[loops])
+        geo = os.path.join(tmp, "bake_uv.bin")
+        with open(geo, "wb") as f:
+            f.write(np.ascontiguousarray(np.concatenate(uvs).astype(np.float32)).tobytes())
+        return {"image": path, "geometry": geo}
+    finally:
+        if context.object and context.object.mode != "OBJECT":
+            bpy.ops.object.mode_set(mode="OBJECT")
+        for m, n, before in added:
+            m.node_tree.nodes.remove(n)
+            m.node_tree.nodes.active = before
+        for _, cp in copies:
+            me = cp.data
+            bpy.data.objects.remove(cp)
+            bpy.data.meshes.remove(me)
+        for m in temp_mats:
+            bpy.data.materials.remove(m)
+        bpy.data.images.remove(img)
+        for ob in hidden:
+            ob.hide_render = False
+        scene.render.engine = engine
+        if samples_before is not None:
+            scene.cycles.samples = samples_before
+        for o in selected:
+            if o.name in bpy.data.objects:
+                o.select_set(True)
+        context.view_layer.objects.active = active
+
+
 def _write_geometry(g, tmp, prefix):
     """A gather() result as the core's files: corner arrays, further coordinate sets; the spec's part for them."""
     pos, nrm, uv, mat, materials, sets = g
@@ -299,6 +411,9 @@ class G3_OT_export_mesh(bpy.types.Operator):
         ("model", "З моделі", "Колізія з трикутників самої моделі, навіть якщо є *_COL чи колізія гри"),
         ("none", "Ні", "Лишити колізію гри як є (або без колізії)"),
     ), default="auto")
+    bake: BoolProperty(name="Запекти світло в Blender", description="Для змінених частин будівель, які гра освітлює сторінками лайтмап: світло зі сцени Blender (лампи, небо; Cycles) замість перенесення зі старих сторінок", default=False)
+    bake_size: IntProperty(name="Розмір запікання", description="Сторона картинки запікання в пікселях", default=1024, min=64, max=8192)
+    bake_samples: IntProperty(name="Семпли", description="Семпли Cycles на піксель запікання", default=64, min=1, max=4096)
     shape_material: EnumProperty(name="Поверхня (типово)", description="Для матеріалів, у яких поверхню не задано й не вгадано з назви (панель матеріалу → Gothic 3: поверхня)", items=[(m, m, SHAPE_HINTS.get(m, "")) for m in SHAPE_MATERIALS], default="stone")
 
     @classmethod
@@ -321,6 +436,11 @@ class G3_OT_export_mesh(bpy.types.Operator):
         col.prop(self, "collision")
         if self.collision != "none":
             col.prop(self, "shape_material")
+        col.prop(self, "bake")
+        if self.bake:
+            row = col.row()
+            row.prop(self, "bake_size")
+            row.prop(self, "bake_samples")
 
     def execute(self, context):
         selected = [o for o in context.selected_objects if o.type == "MESH"]
@@ -355,6 +475,8 @@ class G3_OT_export_mesh(bpy.types.Operator):
                 return {"CANCELLED"}
             spec = os.path.join(tmp, "spec.json")
             doc = {"name": self.name, **_write_geometry(g, tmp, "model")}
+            if self.bake:
+                doc["bake"] = bake_light(context, [o for o in objects if o.type == "MESH"], tmp, self.bake_size, self.bake_samples)
             doc["primitives"] = [primitive(o, self.scale) for o in sorted(prim_objects, key=lambda o: o.name)]
             fg = gather(context, far_objects, self.scale, tmp) if far_objects else None
             if fg is not None:
@@ -411,6 +533,8 @@ class G3_OT_export_mesh(bpy.types.Operator):
             self.report({"INFO"}, f"дані для розміщення в редакторі світу: {side}")
         if r.get("pages_kept"):
             self.report({"INFO"}, f"сторінки лайтмап гри збережено для {r['pages_kept']} частин (форма та сама)")
+        if r.get("pages_baked"):
+            self.report({"INFO"}, f"світло запечено в Blender для {r['pages_baked']} нових сторінок")
         if r.get("pages_rebaked"):
             self.report({"INFO"}, f"нові сторінки лайтмап (світло перенесено зі старих) для {r['pages_rebaked']} змінених частин")
         self.report({"INFO"}, f"{self.name} ({what}): {r['vertices']} вершин, {r['triangles']} трикутників → {where}")

@@ -236,6 +236,7 @@ try:
     want = ["(opaque)", "(alpha test)", "(blend)", "(glow)"]
     check(r == {"FINISHED"} and len(mats) == 4 and all(any(m.endswith(w) for m in mats) for w in want), f"looks exported: {mats}")
 
+    engine_at_start = bpy.context.scene.render.engine
     # 10. A building lit by lightmap pages: its lightmap coordinates come in as a UV layer, a wall's second texture set as
     #     another; exported back unchanged, every part keeps the game's pages.
     clear()
@@ -267,6 +268,25 @@ try:
     rep = seen.get("out", {}).get("report", {})
     check(r == {"FINISHED"} and rep.get("pages_rebaked", 0) > 0 and rep.get("pages_kept", 0) < 4 and not any("per vertex" in w for w in rep.get("warnings", [])),
           f"pages made anew: {rep.get('pages_rebaked')}, kept {rep.get('pages_kept')}, warnings {rep.get('warnings')}")
+    # 10c. The same with the light baked in Blender (Cycles, a sun): the new pages take it; the scene is as it was.
+    sun = bpy.data.objects.new("bake_sun", bpy.data.lights.new("bake_sun", "SUN"))
+    sun.rotation_euler = (0.6, 0.2, 0.4)
+    bpy.context.scene.collection.objects.link(sun)
+    bpy.ops.object.select_all(action="DESELECT")
+    arena.select_set(True)
+    bpy.context.view_layer.objects.active = arena
+    nodes_before = sum(len(m.node_tree.nodes) for m in arena.data.materials if m and m.node_tree)
+    objects_before, images_before = len(bpy.data.objects), len(bpy.data.images)
+    seen.clear()
+    core.run = spy
+    r = bpy.ops.gothic3.export_mesh(name="G3_Architecture_Arena_Manege_01", mode="package", folder=os.path.join(OUT, "arena_pkg3"), title="Arena (test)", collision="none", bake=True, bake_size=256, bake_samples=4)
+    core.run = orig
+    rep = seen.get("out", {}).get("report", {})
+    bk = seen.get("spec", {}).get("bake") or {}
+    restored = (sum(len(m.node_tree.nodes) for m in arena.data.materials if m and m.node_tree) == nodes_before and len(bpy.data.objects) == objects_before
+                and len(bpy.data.images) == images_before and not arena.hide_render and bpy.context.scene.render.engine != "CYCLES" or bpy.context.scene.render.engine == engine_at_start)
+    check(r == {"FINISHED"} and rep.get("pages_baked", 0) > 0 and rep.get("pages_kept") == 2 and os.path.basename(bk.get("image", "")) == "bake.png" and restored,
+          f"baked light: {rep.get('pages_baked')} pages, kept {rep.get('pages_kept')}, scene restored {restored}")
 
     # 11. A far version: a *_LOWPOLY object goes to the distance layer's mesh, not into the model.
     check([export_mesh.is_far(n) for n in ["Tower_LOWPOLY", "Tower_lowpoly.002", "Lowpoly_Tower", "Tower"]] == [True, True, False, False], "is_far")

@@ -8,7 +8,7 @@
 //!   01 03 00 01 · u32 n · n × u32 colour (ARGB) · u8 1 · u32 n · n × f32[3] light direction
 //!   · u16 pages · per page: 44 33 22 11 · u16 1 · u32 page number (0, 1, …) · u32 −1 · u32 −1 · u32 w · u32 h
 //!                            · u32 bytes · bytes (w·h ARGB texels, or none) · when there are texels: u32 4·h · per row
-//!                              u16 first · u16 end of the texels it uses
+//!                              u16 first · u16 end of its lit texels (alpha 255; an unlit texel is 0)
 //! u8 0 · string table (the mesh path among the strings)
 //! ```
 //! Every one of the 11138 shipped files reads to its last byte so (see the test). `textured` is the placement's own

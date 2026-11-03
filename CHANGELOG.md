@@ -34,6 +34,12 @@
   cube, cylinder or capsule, UV sphere — moved, turned and scaled as you like) go into the placement sidecar as the
   game's shapes 3, 4 and 5, with their sizes and the shape's data as the game writes it; they are not part of the model.
 - The glow look's blend mode 7 is the engine's own `Brighten` (read from Engine.dll, where 6 is `Darken`).
+- **Bake lightmaps in Blender** (export option): the new pages of changed parts take the scene's light — its lamps and
+  sky, baked by Cycles (diffuse lighting only) on copies of the objects with an atlas UV — instead of the old pages'
+  light; the scene is left as it was. Without it the light is still carried over from the old pages.
+- New lightmap pages mark their lit texels as the game does (alpha 255, the rest 0), and each row's span is the extent
+  of its lit texels — what every row of the game's pages is but 130 of 1.9 million. Taking light over from old pages
+  no longer picks up their unlit (black) texels.
 - Every part that is one of the game's elements again keeps its pages (204 of 204 in a sample of 24 buildings, was
   199): vertices of a part that differ only by rounding sometimes matched another group than the one standing for them.
 - Import keeps the game's double-sided faces (a second face on the same three corners), which Blender's OBJ importer

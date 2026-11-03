@@ -104,6 +104,11 @@ pub struct UvSpec { pub stream: u32, pub geometry: String }
 #[derive(Deserialize, Default)]
 pub struct FarSpec { pub geometry: String, pub corners: usize, pub materials: Vec<MatSpec>, #[serde(default)] pub uv_extra: Vec<UvSpec> }
 
+/// Light baked in Blender (Cycles, the scene's lamps and sky, lighting only): a picture and, per corner of the model's
+/// geometry, its place in it (f32×2, Blender UV). Changed parts take their new lightmap pages from it.
+#[derive(Deserialize)]
+pub struct BakeSpec { pub image: String, pub geometry: String }
+
 /// A box, capsule or sphere of the collision (`*_COL_BOX`, `*_COL_CAPSULE`, `*_COL_SPHERE` objects), game axes, cm:
 /// `axes` rows (a box's axis k; a capsule's length is row 1), `half` a box's half extents, `height` a capsule's straight
 /// part. For the placement sidecar: an entity holds these shapes itself, no file.
@@ -113,10 +118,10 @@ pub struct PrimSpec { pub kind: String, pub center: [f32; 3], #[serde(default = 
 fn identity() -> [[f32; 3]; 3] { [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] }
 
 #[derive(Deserialize, Default)]
-pub struct Spec { pub name: String, pub geometry: String, pub corners: usize, pub materials: Vec<MatSpec>, pub collision: Option<CollisionSpec>, #[serde(default)] pub uv_extra: Vec<UvSpec>, #[serde(default)] pub lowpoly: Option<FarSpec>, #[serde(default)] pub primitives: Vec<PrimSpec> }
+pub struct Spec { pub name: String, pub geometry: String, pub corners: usize, pub materials: Vec<MatSpec>, pub collision: Option<CollisionSpec>, #[serde(default)] pub uv_extra: Vec<UvSpec>, #[serde(default)] pub lowpoly: Option<FarSpec>, #[serde(default)] pub primitives: Vec<PrimSpec>, #[serde(default)] pub bake: Option<BakeSpec> }
 
 #[derive(serde::Serialize, Default)]
-pub struct Report { pub name: String, pub replaced: bool, pub vertices: usize, pub triangles: usize, pub materials: Vec<String>, pub collision: Option<String>, pub convex: Option<String>, pub lightmaps: usize, pub pages_kept: usize, pub pages_rebaked: usize, pub lods: Vec<String>, pub files: Vec<String>, pub warnings: Vec<String>, pub placement: serde_json::Value }
+pub struct Report { pub name: String, pub replaced: bool, pub vertices: usize, pub triangles: usize, pub materials: Vec<String>, pub collision: Option<String>, pub convex: Option<String>, pub lightmaps: usize, pub pages_kept: usize, pub pages_rebaked: usize, pub pages_baked: usize, pub lods: Vec<String>, pub files: Vec<String>, pub warnings: Vec<String>, pub placement: serde_json::Value }
 
 /// Corner arrays: positions f32×3, normals f32×3, uvs f32×2 (V down), material u32 per triangle.
 fn read_geometry(path: &str, corners: usize) -> Result<(Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>)> {
@@ -293,7 +298,7 @@ fn as_element(orig: &crate::g3_res::G3Mesh, e: usize, p: &crate::xcmsh_write::Pa
     let (first, n) = (first as usize, n as usize);
     let s = &orig.geo.submeshes[e];
     let tris: Vec<[u32; 3]> = orig.geo.indices[s.first_index as usize..(s.first_index + s.index_count) as usize].chunks_exact(3).map(|c| [c[0], c[1], c[2]].map(|i| i - first as u32)).collect();
-    if n == 0 || tris.len() != p.triangles.len() || n < p.positions.len() { return None; }
+    if n == 0 || tris.len() != p.triangles.len() { return None; }
     let has_uv = orig.geo.uvs.len() == orig.geo.positions.len() && p.uvs.len() == p.positions.len();
     let has_n = p.normals.len() == p.positions.len();
     // Vertices of the part that are one vertex but for rounding (Blender's corner normals of one vertex differ in the
@@ -301,7 +306,7 @@ fn as_element(orig: &crate::g3_res::G3Mesh, e: usize, p: &crate::xcmsh_write::Pa
     let cell = |q: [f32; 3]| q.map(|x| x.floor() as i32);
     let near = |a: &[f32], b: &[f32], tol: f32| a.iter().zip(b).all(|(x, y)| (x - y).abs() <= tol);
     let twins = |j: usize, k: usize| near(&p.positions[j], &p.positions[k], 0.05) && (!has_uv || near(&p.uvs[j], &p.uvs[k], 1e-3))
-        && (!has_n || near(&p.normals[j], &p.normals[k], 0.02)) && p.extra.iter().all(|(_, v)| v.len() != p.positions.len() || near(&v[j], &v[k], 1e-3));
+        && (!has_n || near(&p.normals[j], &p.normals[k], 0.02)) && p.extra.iter().all(|(t, v)| *t == crate::rebake::BAKE_UV || v.len() != p.positions.len() || near(&v[j], &v[k], 1e-3));
     let mut grid: HashMap<[i32; 3], Vec<u32>> = HashMap::new();
     let mut canon: Vec<u32> = Vec::with_capacity(p.positions.len());
     for j in 0..p.positions.len() {
@@ -380,7 +385,7 @@ fn lightmaps_of(g: &G3Ctx, tpath: &str) -> Result<Vec<(String, Vec<u8>)>> {
     Ok(out)
 }
 
-fn lightmaps(g: &G3Ctx, orig: &crate::g3_res::G3Mesh, tpath: &str, parts: &[crate::xcmsh_write::Part], near: &[Vec<u32>], kept: &[Option<usize>], charts: &[Option<crate::charts::Tail>], r: &mut Report, files: &mut Vec<(String, String, Vec<u8>)>) -> Result<()> {
+fn lightmaps(g: &G3Ctx, orig: &crate::g3_res::G3Mesh, tpath: &str, parts: &[crate::xcmsh_write::Part], near: &[Vec<u32>], kept: &[Option<usize>], charts: &[Option<crate::charts::Tail>], baked: Option<&crate::rebake::Baked>, r: &mut Report, files: &mut Vec<(String, String, Vec<u8>)>) -> Result<()> {
     let mut paged = vec![];
     let orig_tails: Vec<Option<crate::charts::Tail>> = orig.element_tails.iter().map(|t| crate::charts::parse(t).ok()).collect();
     for (lk, d) in lightmaps_of(g, tpath)? {
@@ -408,7 +413,7 @@ fn lightmaps(g: &G3Ctx, orig: &crate::g3_res::G3Mesh, tpath: &str, parts: &[crat
             let v: Vec<(u32, [f32; 3])> = n.iter().map(|&i| light[i as usize].or(any).unwrap_or((0xff80_8080, [0.0, 1.0, 0.0]))).collect();
             let cols: Vec<u32> = v.iter().map(|x| x.0).collect();
             match (charts.get(i).and_then(Option::as_ref), size, &old) {
-                (Some(tail), Some(s), Some(old)) => { pages.push(crate::rebake::pages(&parts[i], tail, s, old, &cols)); r.pages_rebaked += 1; }
+                (Some(tail), Some(s), Some(old)) => { pages.push(crate::rebake::pages(&parts[i], tail, s, old, &cols, baked)); r.pages_rebaked += 1; r.pages_baked += baked.is_some() as usize; }
                 _ => pages.push(crate::lightmap::NONE.to_vec()),
             }
             elements.push((cols, v.iter().map(|x| x.1).collect()));
@@ -458,7 +463,7 @@ fn parts_of(geometry: &str, corners: usize, uv_extra: &[UvSpec], mat_names: &[St
     // Further coordinate sets (Blender's G3_UV2… and G3_Lightmap layers), per corner.
     let mut extra_in: Vec<(u32, Vec<[f32; 2]>)> = vec![];
     for u in uv_extra {
-        if !crate::g3_res::UV_EXTRA.contains(&u.stream) { bail!("coordinate stream {} is not one of {:?}", u.stream, crate::g3_res::UV_EXTRA); }
+        if !crate::g3_res::UV_EXTRA.contains(&u.stream) && u.stream != crate::rebake::BAKE_UV { bail!("coordinate stream {} is not one of {:?}", u.stream, crate::g3_res::UV_EXTRA); }
         let d = std::fs::read(&u.geometry).with_context(|| format!("read {}", u.geometry))?;
         if d.len() != corners * 8 { bail!("coordinate set {}: {} bytes for {} corners", u.stream, d.len(), corners); }
         let f = |i: usize| f32::from_le_bytes(d[i * 4..i * 4 + 4].try_into().unwrap());
@@ -496,7 +501,13 @@ pub fn build(g: &G3Ctx, spec: &Spec) -> Result<(Report, Vec<(String, String, Vec
     let now = crate::volume::filetime_now();
     let mut made = HashMap::new();
     let mat_names = material_names(g, &spec.materials, now, &mut made, &mut r, &mut files)?;
-    let (parts, pos, tri_mat) = parts_of(&spec.geometry, spec.corners, &spec.uv_extra, &mat_names)?;
+    // Light baked in Blender for parts whose shape changed: the picture, and each corner's place in it.
+    let mut uv_sets: Vec<UvSpec> = spec.uv_extra.iter().map(|u| UvSpec { stream: u.stream, geometry: u.geometry.clone() }).collect();
+    let baked = match &spec.bake {
+        Some(b) => { uv_sets.push(UvSpec { stream: crate::rebake::BAKE_UV, geometry: b.geometry.clone() }); Some(crate::rebake::Baked { image: image::open(&b.image).with_context(|| format!("baked light {}", b.image))?.to_rgba8() }) }
+        None => None,
+    };
+    let (parts, pos, tri_mat) = parts_of(&spec.geometry, spec.corners, &uv_sets, &mat_names)?;
     r.vertices = parts.iter().map(|p| p.positions.len()).sum();
     r.triangles = spec.corners / 3;
     let existing = crate::staticmesh::mesh_key(g, &name);
@@ -557,7 +568,7 @@ pub fn build(g: &G3Ctx, spec: &Spec) -> Result<(Report, Vec<(String, String, Vec
                 p.diffuse = n.iter().map(|&i| o.diffuse[i as usize]).collect();
                 p.specular = n.iter().map(|&i| o.specular[i as usize]).collect();
             }
-            lightmaps(g, o, tpath, &tparts, &near, &kept, &charts, &mut r, &mut files)?;
+            lightmaps(g, o, tpath, &tparts, &near, &kept, &charts, baked.as_ref().filter(|_| !*is_far), &mut r, &mut files)?;
         }
         files.push(("_compiledMesh".to_string(), tpath.clone(), crate::xcmsh_write::write(&tparts)));
     }
@@ -787,7 +798,7 @@ mod tests {
         let mats = || geo.submeshes.iter().map(|s| MatSpec { name: s.material.trim_end_matches(".xshmat").to_string(), ..Default::default() }).collect();
         let uv_extra = m.uv_extra.iter().zip(&x).map(|((ty, _), b)| { let f = dir.join(format!("uv{ty}.bin")); std::fs::write(&f, b).unwrap(); UvSpec { stream: *ty, geometry: f.to_string_lossy().into_owned() } }).collect();
         Spec { name: crate::stem_of(key), geometry: geof.to_string_lossy().into_owned(), corners: t.len() * 3, materials: mats(),
-            collision: Some(CollisionSpec { geometry: None, corners: None, material: Some("stone".into()), mode: Some(collision.into()), materials: vec![], convex: vec![] }), uv_extra, lowpoly: None, primitives: vec![] }
+            collision: Some(CollisionSpec { geometry: None, corners: None, material: Some("stone".into()), mode: Some(collision.into()), materials: vec![], convex: vec![] }), uv_extra, lowpoly: None, primitives: vec![], bake: None }
     }
 
     /// The landscape cell written back from its own triangles: same colours, its one lightmap rebuilt to the
@@ -945,6 +956,63 @@ mod tests {
         }
         eprintln!("rebaked: {n} triangle middles, mean |Δ| {:.2} of 255 (another triangle's: {:.2})", sum / n.max(1) as f32, base / n.max(1) as f32);
         assert!(n > 100 && sum / (n as f32) < 12.0 && sum * 3.0 < base, "{n} triangles, mean |Δ| {} (another's {})", sum / n.max(1) as f32, base / n.max(1) as f32);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Light baked in Blender for a changed part: its new pages take each lit texel's colour from the baked picture at
+    /// the texel's place on the part. With a picture whose red and green are a linear map of the position, every texel
+    /// inside a triangle shows the colour of its own place; the pages read back strictly.
+    #[test]
+    fn baked_light_goes_into_the_new_pages() {
+        let Ok(root) = std::env::var("G3_GAME") else { return };
+        let g = G3Ctx::open_original(Path::new(&root)).unwrap();
+        let key = crate::staticmesh::mesh_key(&g, "G3_Architecture_Arena_Manege_01").unwrap();
+        let dir = std::env::temp_dir().join(format!("g3ie_test_bake_{}", std::process::id()));
+        let mut spec = spec_of(&g, &key, &dir, "none");
+        // Move one vertex, so element 0 changes.
+        let mut geo = std::fs::read(&spec.geometry).unwrap();
+        let first: [u8; 12] = geo[0..12].try_into().unwrap();
+        for c in 0..spec.corners { if geo[c * 12..c * 12 + 12] == first { let y = f32::from_le_bytes(geo[c * 12 + 4..c * 12 + 8].try_into().unwrap()) + 10.0; geo[c * 12 + 4..c * 12 + 8].copy_from_slice(&y.to_le_bytes()); } }
+        std::fs::write(&spec.geometry, &geo).unwrap();
+        // Bake UV = the position's x and z across the model's box; the picture: red = u, green = v.
+        let pos: Vec<[f32; 3]> = (0..spec.corners).map(|c| [0, 1, 2].map(|k| f32::from_le_bytes(geo[c * 12 + k * 4..c * 12 + k * 4 + 4].try_into().unwrap()))).collect();
+        let (lo, hi) = pos.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(l, h), p| ([0, 1, 2].map(|k| l[k].min(p[k])), [0, 1, 2].map(|k| h[k].max(p[k]))));
+        let uv = |p: [f32; 3]| [(p[0] - lo[0]) / (hi[0] - lo[0]), (p[2] - lo[2]) / (hi[2] - lo[2])];
+        let mut b = vec![];
+        for p in &pos { for x in uv(*p) { b.extend(x.to_le_bytes()); } }
+        std::fs::write(dir.join("bake_uv.bin"), b).unwrap();
+        let n = 256u32;
+        image::RgbaImage::from_fn(n, n, |x, y| image::Rgba([((x as f32 + 0.5) / n as f32 * 255.0).round() as u8, ((n - 1 - y) as f32 + 0.5).mul_add(255.0 / n as f32, 0.0).round() as u8, 40, 255])).save(dir.join("bake.png")).unwrap();
+        spec.bake = Some(BakeSpec { image: dir.join("bake.png").to_string_lossy().into_owned(), geometry: dir.join("bake_uv.bin").to_string_lossy().into_owned() });
+        let (r, files) = build(&g, &spec).unwrap();
+        assert!(r.pages_baked > 0 && r.pages_baked == r.pages_rebaked, "{} baked, {} new", r.pages_baked, r.pages_rebaked);
+        let mesh = crate::g3_res::decode_xcmsh(&files.iter().find(|f| f.1.eq_ignore_ascii_case(g.path_of(&key).unwrap())).unwrap().2).unwrap();
+        let tail = crate::charts::parse(&mesh.element_tails[0]).unwrap();
+        let l73 = &mesh.uv_extra.iter().find(|x| x.0 == 73).unwrap().1;
+        let (mut err, mut texels) = (0f32, 0);
+        for f in files.iter().filter(|f| f.0 == "Lightmaps") {
+            let lm = crate::lightmap::parse(&f.2).unwrap();
+            if !lm.has_pages(0) { continue; }
+            for (c, (w, h, px, _)) in tail.charts.iter().zip(crate::rebake::read_pages(&lm.pages[0])) {
+                let on = mesh.geo.positions[c.vertices[0] as usize];
+                let (u_ax, v_ax, nn) = c.axes();
+                let tris: Vec<[[f32; 2]; 3]> = c.triangles.iter().map(|&t| { let s = &mesh.geo.submeshes[0]; [0, 1, 2].map(|k| l73[mesh.geo.indices[s.first_index as usize + t as usize * 3 + k] as usize]) }).collect();
+                for j in 0..h { for i in 0..w {
+                    let x = px[j * w + i];
+                    if x >> 24 == 0 { continue; }
+                    let q = [(i as f32 - 0.5) / (w as f32 - 2.0) * c.max[0], (j as f32 - 0.5) / (h as f32 - 2.0) * c.max[1]];
+                    let inside = tris.iter().any(|t| { let s = |a: [f32; 2], b: [f32; 2]| (b[0] - a[0]) * (q[1] - a[1]) - (b[1] - a[1]) * (q[0] - a[0]); let (d0, d1, d2) = (s(t[0], t[1]), s(t[1], t[2]), s(t[2], t[0])); (d0 >= 0.0 && d1 >= 0.0 && d2 >= 0.0) || (d0 <= 0.0 && d1 <= 0.0 && d2 <= 0.0) });
+                    if !inside { continue; }
+                    let m = &c.matrix;
+                    let p = [0, 1, 2].map(|k| u_ax[k] * (q[0] - m[12]) + v_ax[k] * (q[1] - m[13]) + nn[k] * (on[0] * nn[0] + on[1] * nn[1] + on[2] * nn[2]));
+                    let want = uv(p).map(|t| t * 255.0);
+                    err += ((x >> 16 & 255) as f32 - want[0]).abs().max(((x >> 8 & 255) as f32 - want[1]).abs());
+                    texels += 1;
+                } }
+            }
+        }
+        eprintln!("baked: {texels} texels inside triangles, mean error {:.2} of 255", err / texels.max(1) as f32);
+        assert!(texels > 1000 && err / (texels as f32) < 3.0);
         std::fs::remove_dir_all(&dir).ok();
     }
 
