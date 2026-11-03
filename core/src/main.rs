@@ -31,6 +31,8 @@
 //! gothic3-core lip-lines <game> [language]                the voice lines with a lip-sync timeline
 //! gothic3-core lipsync <game> <head> <line> <language> <out dir>
 //!                                                           a voice line on an animated head's face bones (glb) + its .ogg
+//! gothic3-core export-lipsync <game> <spec.json> install <mod> | package <folder> <title> | mod <file.g3mod> <name> [author]
+//!                                                           a line's phones as its .xlip, where the game looks for it
 //! gothic3-core terrain-cells <game>                         the landscape cells: name, land, box over the ground
 //! gothic3-core terrain <game> <cells | @x,z,r> <out dir>    landscape cells to edit, with all they carry (.g3terrain)
 //! gothic3-core export-terrain <game> <spec.json> install <mod> | package <folder> <title>
@@ -221,6 +223,13 @@ fn run(args: &[String]) -> Result<serde_json::Value> {
         (Some("lipsync"), Some(game)) => {
             let g = open(game)?;
             serde_json::to_value(lipsync::build(&g, a(3).context("head actor")?, a(4).context("voice line")?, a(5).unwrap_or("English"), Path::new(a(6).context("out dir")?))?)?
+        }
+        (Some("export-lipsync"), Some(game)) => {
+            let spec: lipsync::LipSpec = serde_json::from_str(&std::fs::read_to_string(a(3).context("spec.json")?)?).context("lip-sync spec")?;
+            let (report, file) = lipsync::export(&spec)?;
+            let mut out = mods::deliver(Path::new(game), a(4).unwrap_or("install"), a(5).context("mod name, package folder or mod file")?, a(6).unwrap_or(""), a(7).unwrap_or(""), &[file])?;
+            out["report"] = report;
+            out
         }
         (Some("terrain-cells"), Some(game)) => serde_json::to_value(terrain::cells(&open(game)?)?)?,
         (Some("terrain"), Some(game)) => {

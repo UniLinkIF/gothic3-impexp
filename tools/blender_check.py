@@ -302,13 +302,33 @@ try:
     line = next(n for n in core.run("lip-lines", pr.game_dir, "English") if n.startswith("INFO_Ass_Elite_Hard_Bandaro"))
     bpy.context.view_layer.objects.active = arm
     arm.select_set(True)
+    seen.clear()
+    def spy_l(cmd, *args):
+        out = orig(cmd, *args)
+        if cmd in ("lipsync", "export-lipsync"):
+            seen[cmd] = out
+            if cmd == "export-lipsync":
+                seen["spec"] = json.load(open(args[1], encoding="utf-8"))
+        return out
+    core.run = spy_l
     r = bpy.ops.gothic3.import_lipsync(line=line, language="English")
+    core.run = orig
     act = arm.animation_data.action if arm.animation_data else None
     paths = {fc.data_path.split('"')[1] for fcs in lipsync._fcurves(act) for fc in fcs} if act else set()
     se = bpy.context.scene.sequence_editor
     strips = list(se.strips if hasattr(se, "strips") else se.sequences) if se else []
     check(r == {"FINISHED"} and act and act.get("g3_lipsync") == line and paths and all(("Lip" in p or "Jaw" in p or "Eye" in p or "UpDown" in p) for p in paths) and any(s.type == "SOUND" for s in strips),
           f"lip-sync: {len(paths)} bones moved ({sorted(paths)[:3]}), strips {[s.type for s in strips]}")
+    # 10b. The line's action back as its .xlip: every key read as the nearest of the head's poses gives the line's own
+    #      phones at their own times.
+    core.run = spy_l
+    r = bpy.ops.gothic3.export_lipsync(line=line, language="English", head="G3_Head_Hero_Hero_Animated_01", mode="package", folder=os.path.join(OUT, "lip_pkg"), title="Lip (test)")
+    core.run = orig
+    want = seen.get("lipsync", {}).get("timeline", [])
+    got = seen.get("spec", {}).get("phones", [])
+    same = len(want) == len(got) and all(a[1] == b[1] and abs(a[0] - b[0]) < 1e-4 for a, b in zip(want, got))
+    wrong = [(a, b) for a, b in zip(want, got) if a[1] != b[1] or abs(a[0] - b[0]) >= 1e-4][:3]
+    check(r == {"FINISHED"} and same and os.path.isfile(os.path.join(OUT, "lip_pkg", "Speech_English.vol")), f"lip-sync back: {len(got)} of {len(want)} phones, first wrong {wrong}")
 except Exception:
     traceback.print_exc()
     fails.append("exception")

@@ -18,6 +18,7 @@ EXPORTS = (
     "gothic3.export_motion",
     "gothic3.export_actor",
     "gothic3.export_terrain",
+    "gothic3.export_lipsync",
 )
 
 

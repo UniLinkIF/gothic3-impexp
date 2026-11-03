@@ -16,6 +16,11 @@
 - The unknown u32 at 32 of an actor is the size of the source it was compiled from: the FXA's length in every actor
   compiled since August 2006 (the 66 that differ are all older). The actor export writes that, as before; now a test
   holds it.
+- Lip-sync follows the game's own rule (Engine.dll builds a line's motion from key number `phone` of every key array
+  of the head's clip with at least 14 keys; shorter ones stay still), so a few short position tracks no longer move.
+- **Export → Gothic 3 Lip-sync → Mod**: a face action back to a line's `.xlip` (`Speech_<Language>`): at every key the
+  nearest of the head's poses. The writer gives every one of the game's 24 241 `.xlip` back to the byte (the German
+  patch's three in their plain form too).
 - Motion export **as a new variant** of the clip's action: the next free variant number (the wolf's ambient loops
   01–05 → 06), named the way the game composes clip names. The report says what the game makes of a new name: a
   variant, words the game never composes, or a name it does not look up.
