@@ -114,6 +114,10 @@ try:
     check(len(seen.get("spec", {}).get("collision", {}).get("convex", [])) == 1, "the _CV child went along unselected")
     files = sorted(os.listdir(pkg))
     check({"INSTALL.bat", "ROLLBACK.bat", "_compiledPhysic.vol", "_compiledPhysic.empty"} <= set(files), f"package: {files}")
+    # 4a. The placement sidecar in the package and the cache: the helm's shapes, its convex body among them.
+    side = [os.path.join(pkg, "G3_Armor_Helm_Myrtana_01.placement.json"), os.path.join(pr.cache_dir, "placement", "G3_Armor_Helm_Myrtana_01.placement.json")]
+    kinds = [s["ShapeType"] for s in json.load(open(side[0], encoding="utf-8"))["eCCollisionShape_PS"]["shapes"]] if os.path.isfile(side[0]) else []
+    check(6 in kinds and os.path.isfile(side[1]), f"placement sidecar: shape types {kinds}")
 
     # 4b. The same as one mod file (the default): a ZIP with mod.json and the files under their archives.
     import zipfile

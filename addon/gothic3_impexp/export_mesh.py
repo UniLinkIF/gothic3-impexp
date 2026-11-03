@@ -362,6 +362,13 @@ class G3_OT_export_mesh(bpy.types.Operator):
             self.report({"INFO"}, f"разом з LOD: {', '.join(r['lods'])}")
         if r.get("lightmaps"):
             self.report({"INFO"}, f"освітлення перенесено на {r['lightmaps']} розміщень у світі")
+        if r.get("placement"):
+            # For a world editor: what an entity placing this model needs (its collision shapes); a package has it too.
+            side = os.path.join(core.cache_dir(), "placement", f"{r['name']}.placement.json")
+            os.makedirs(os.path.dirname(side), exist_ok=True)
+            with open(side, "w", encoding="utf-8") as f:
+                json.dump(r["placement"], f, indent=1, ensure_ascii=False)
+            self.report({"INFO"}, f"дані для розміщення в редакторі світу: {side}")
         if r.get("pages_kept"):
             self.report({"INFO"}, f"сторінки лайтмап гри збережено для {r['pages_kept']} частин (форма та сама)")
         self.report({"INFO"}, f"{self.name} ({what}): {r['vertices']} вершин, {r['triangles']} трикутників → {where}")

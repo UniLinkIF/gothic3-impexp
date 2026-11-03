@@ -41,6 +41,7 @@ mod modfile;
 mod mods;
 mod motion_write;
 mod nxs;
+mod placement;
 mod geom;
 mod glb;
 mod lightmap;

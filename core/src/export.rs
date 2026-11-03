@@ -108,7 +108,7 @@ pub struct FarSpec { pub geometry: String, pub corners: usize, pub materials: Ve
 pub struct Spec { pub name: String, pub geometry: String, pub corners: usize, pub materials: Vec<MatSpec>, pub collision: Option<CollisionSpec>, #[serde(default)] pub uv_extra: Vec<UvSpec>, #[serde(default)] pub lowpoly: Option<FarSpec> }
 
 #[derive(serde::Serialize, Default)]
-pub struct Report { pub name: String, pub replaced: bool, pub vertices: usize, pub triangles: usize, pub materials: Vec<String>, pub collision: Option<String>, pub convex: Option<String>, pub lightmaps: usize, pub pages_kept: usize, pub lods: Vec<String>, pub files: Vec<String>, pub warnings: Vec<String> }
+pub struct Report { pub name: String, pub replaced: bool, pub vertices: usize, pub triangles: usize, pub materials: Vec<String>, pub collision: Option<String>, pub convex: Option<String>, pub lightmaps: usize, pub pages_kept: usize, pub lods: Vec<String>, pub files: Vec<String>, pub warnings: Vec<String>, pub placement: serde_json::Value }
 
 /// Corner arrays: positions f32×3, normals f32×3, uvs f32×2 (V down), material u32 per triangle.
 fn read_geometry(path: &str, corners: usize) -> Result<(Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>)> {
@@ -668,6 +668,23 @@ pub fn build(g: &G3Ctx, spec: &Spec) -> Result<(Report, Vec<(String, String, Vec
             }
         }
     }
+    // For a world editor: the shapes an entity placing the model needs, from the collision written (or the game's,
+    // where it stays).
+    let mut placed = vec![];
+    for convex in [false, true] {
+        let is_cv = |p: &str| p.to_lowercase().ends_with("_cv.xnvmsh");
+        let written = files.iter().find(|f| f.1.to_lowercase().ends_with(".xnvmsh") && is_cv(&f.1) == convex).map(|f| (f.1.clone(), f.2.clone()));
+        let game = || { let k = if convex { crate::staticmesh::convex_key(g, &name) } else { crate::staticmesh::collision_key(g, &name) }?; Some((g.path_of(&k)?.to_string(), g.read(&k).ok()?)) };
+        let Some((cpath, bytes)) = written.or_else(|| existing.as_ref().and_then(|_| game())) else { continue };
+        let x = crate::g3_res::parse_xnvmsh(&bytes).with_context(|| format!("{cpath}: read back"))?;
+        for (i, (_, b)) in x.streams.iter().enumerate() {
+            placed.push(crate::placement::Part { shape_type: if convex { crate::placement::CONVEX_HULL } else { crate::placement::TRIANGLE_MESH }, file: cpath.clone(), part: i, material: x.shapes.get(i).map_or(0, |s| s[0]), bounds: *b });
+        }
+    }
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for p in parts.iter().flat_map(|p| &p.positions) { for k in 0..3 { lo[k] = lo[k].min(p[k]); hi[k] = hi[k].max(p[k]); } }
+    let far_path = targets.iter().find(|t| t.1.to_lowercase().ends_with("_lowpoly.xcmsh")).map(|t| t.1.clone());
+    r.placement = crate::placement::sidecar(&path, (lo, hi), far_path.as_deref(), &placed);
     r.files = files.iter().map(|(a, p, _)| format!("{a}/{p}")).collect();
     Ok((r, files))
 }
@@ -676,6 +693,8 @@ pub fn run(g: &G3Ctx, game: &Path, spec_path: &str, mode: &str, arg: &str, title
     let spec: Spec = serde_json::from_str(&std::fs::read_to_string(spec_path)?).context("export spec")?;
     let (report, files) = build(g, &spec)?;
     let mut out = crate::mods::deliver(game, mode, arg, title, author, &files)?;
+    // A package carries the placement sidecar too.
+    if mode == "package" { std::fs::write(Path::new(arg).join(format!("{}.placement.json", report.name)), serde_json::to_string_pretty(&report.placement)?)?; }
     out["report"] = serde_json::to_value(report)?;
     Ok(out)
 }
@@ -902,6 +921,45 @@ mod tests {
         spec.name = "G3IE_Test_New_Arena".into();
         let (r, files) = build(&g, &spec).unwrap();
         assert!(files.iter().any(|f| f.1 == "gothic3_impexp/G3IE_Test_New_Arena_LOWPOLY.xcmsh") && r.lods == ["_lowpoly"], "{:?}", r.files);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The placement sidecar of the water mill names the very shapes the world's entity for the mill has (file, part,
+    /// surface, box); a new model's names its own collision, an item's its convex body.
+    #[test]
+    fn the_placement_sidecar_names_the_shapes_the_world_gives() {
+        let Ok(root) = std::env::var("G3_GAME") else { return };
+        let g = G3Ctx::open_original(Path::new(&root)).unwrap();
+        let dir = std::env::temp_dir().join(format!("g3ie_test_place_{}", std::process::id()));
+        let key = crate::staticmesh::mesh_key(&g, "G3_Myrtana_House_Mill_Water_01").unwrap();
+        let (r, _) = build(&g, &spec_of(&g, &key, &dir.join("mill"), "none")).unwrap();
+        let shapes = r.placement["eCCollisionShape_PS"]["shapes"].as_array().unwrap().clone();
+        let layer = g.keys().into_iter().find(|k| k.ends_with("g3_world_01_x-35000y0z75000_cstat.node")).unwrap();
+        let world = crate::placement::collisions(&g.read(&layer).unwrap()).unwrap();
+        let mill = world.iter().find(|c| c.shapes.iter().any(|s| s.file.as_deref().is_some_and(|f| f.eq_ignore_ascii_case("G3_Myrtana_House_Mill_Water_01_COL.xnvmsh")))).expect("the mill's entity");
+        assert_eq!(shapes.len(), mill.shapes.len());
+        for (ours, game) in shapes.iter().zip(&mill.shapes) {
+            assert_eq!(ours["file"].as_str().unwrap().to_lowercase(), game.file.as_deref().unwrap().to_lowercase());
+            assert_eq!((ours["ShapeType"].as_u64().unwrap() as u32, ours["part"].as_u64().unwrap() as u16, ours["Material"].as_u64().unwrap() as u32), (game.shape_type, game.part, game.material));
+            let b = game.bounds.unwrap();
+            for (k, v) in ["min", "max"].iter().zip([b.0, b.1]) { for i in 0..3 { assert!((ours["box"][k][i].as_f64().unwrap() as f32 - v[i]).abs() < 0.5, "{ours} vs {b:?}"); } }
+            assert_eq!(ours["SkinWidth"].as_f64().unwrap() as f32, game.skin_width);
+        }
+        assert_eq!(r.placement["mesh"]["ResourceFileName"].as_str().unwrap().to_lowercase(), "g3_myrtana_house_mill_water_01.xcmsh");
+        // A new model: its own collision, one part per surface, boxes as written.
+        let mut spec = spec_of(&g, &key, &dir.join("new"), "model");
+        spec.name = "G3IE_Test_Placed_Mill".into();
+        let (r, files) = build(&g, &spec).unwrap();
+        let col = files.iter().find(|f| f.1 == "gothic3_impexp/G3IE_Test_Placed_Mill_COL.xnvmsh").unwrap();
+        let x = crate::g3_res::parse_xnvmsh(&col.2).unwrap();
+        let shapes = r.placement["eCCollisionShape_PS"]["shapes"].as_array().unwrap();
+        assert_eq!(shapes.len(), x.streams.len());
+        for (i, s) in shapes.iter().enumerate() { assert_eq!((s["part"].as_u64().unwrap() as usize, s["Material"].as_u64().unwrap() as u8, s["box"]["min"][0].as_f64().unwrap() as f32), (i, x.shapes[i][0], x.streams[i].1 .0[0])); }
+        // An item: its triangle mesh and its convex body.
+        let helm = crate::staticmesh::mesh_key(&g, "G3_Armor_Helm_Myrtana_01").unwrap();
+        let (r, _) = build(&g, &spec_of(&g, &helm, &dir.join("helm"), "auto")).unwrap();
+        let kinds: Vec<u64> = r.placement["eCCollisionShape_PS"]["shapes"].as_array().unwrap().iter().map(|s| s["ShapeType"].as_u64().unwrap()).collect();
+        assert!(kinds.contains(&6), "{kinds:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
