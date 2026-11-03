@@ -39,7 +39,11 @@ fn affine(d: &[u8], m: usize) -> bool {
 }
 
 /// Every mesh placement of one `.node` world layer.
-pub fn placements(d: &[u8]) -> Result<Vec<Placement>> {
+pub fn placements(d: &[u8]) -> Result<Vec<Placement>> { placements_with(d, &[".xcmsh", ".xlmsh"]) }
+
+/// Every placement of one `.node` world layer of a resource ending in one of `ends` (lowercase): meshes, or
+/// SpeedTrees (`eCSpeedTree_PS.ResourceFilePath`, a `bCSpeedTreeResourceString`, `.spt`).
+pub fn placements_with(d: &[u8], ends: &[&str]) -> Result<Vec<Placement>> {
     if !d.starts_with(b"GENOMFLE") { bail!("not a compiled (GENOMFLE) world layer: a stand-in of the editors, nothing the game places"); }
     let t = genomfle_strings(d)?;
     let end = (u32::from_le_bytes(d[10..14].try_into().unwrap()) as usize).min(d.len());
@@ -58,7 +62,7 @@ pub fn placements(d: &[u8]) -> Result<Vec<Placement>> {
         if names.contains(&u16_(d, p)) && u16_(d, p + 4) == 30 {
             if let Some(m) = t.get(u16_(d, p + 10) as usize) {
                 let l = m.to_lowercase();
-                if l.ends_with(".xcmsh") || l.ends_with(".xlmsh") { meshes.push((p, m.clone())); }
+                if ends.iter().any(|e| l.ends_with(e)) { meshes.push((p, m.clone())); }
             }
         }
     }
@@ -109,6 +113,8 @@ pub struct Area {
     pub items: Vec<Item>,
     /// Landscape cells under the area (their vertices are in world space).
     pub landscape: Vec<String>,
+    /// SpeedTrees of the static cells within the radius (`mesh` = the `.spt` stem): stand-ins to look at.
+    pub trees: Vec<Item>,
     pub skipped: BTreeMap<String, usize>,
 }
 
@@ -135,14 +141,20 @@ pub fn area(g: &G3Ctx, name: &str, radius: f32) -> Result<Area> {
     let n = own.len().max(1) as f32;
     let center = if own.is_empty() { [0.0; 2] } else { [own.iter().map(|p| p.world[12]).sum::<f32>() / n, own.iter().map(|p| p.world[14]).sum::<f32>() / n] };
     let mut landscape = vec![];
+    let mut trees = vec![];
     if radius > 0.0 {
         let reach = radius + CELL;
         for k in keys.iter().filter(|k| k.starts_with(ROOT) && k.contains("/sysdyn_") && k.ends_with("_cstat.node")) {
             let Some(c) = cell_centre(k) else { continue };
             let (dx, dz) = (c[0] - center[0], c[1] - center[1]);
             if dx * dx + dz * dz > reach * reach { continue; }
-            let Ok(ps) = g.read(k).and_then(|b| placements(&b)) else { *skipped.entry("unreadable static cell".into()).or_default() += 1; continue };
+            let Ok(b) = g.read(k) else { *skipped.entry("unreadable static cell".into()).or_default() += 1; continue };
+            let Ok(ps) = placements(&b) else { *skipped.entry("unreadable static cell".into()).or_default() += 1; continue };
             let src = stem(g.path_of(k).unwrap_or(k)).to_string();
+            for p in placements_with(&b, &[".spt"]).unwrap_or_default() {
+                let (dx, dz) = (p.world[12] - center[0], p.world[14] - center[1]);
+                if dx * dx + dz * dz <= radius * radius { trees.push(Item { mesh: p.mesh[..p.mesh.len() - 4].to_string(), source: src.clone(), world: p.world }); }
+            }
             for p in ps {
                 let (dx, dz) = (p.world[12] - center[0], p.world[14] - center[1]);
                 if dx * dx + dz * dz > radius * radius { continue; }
@@ -160,14 +172,15 @@ pub fn area(g: &G3Ctx, name: &str, radius: f32) -> Result<Area> {
             }
         }
     }
-    Ok(Area { layer, center, radius, items, landscape, skipped })
+    Ok(Area { layer, center, radius, items, landscape, trees, skipped })
 }
 
 /// `area` plus every mesh it uses written as OBJ into `out_dir` (as the model import does): the add-on loads each
 /// once and links it at each placement.
-pub fn area_obj(g: &G3Ctx, name: &str, radius: f32, ground: bool, out_dir: &Path) -> Result<serde_json::Value> {
+pub fn area_obj(g: &G3Ctx, name: &str, radius: f32, ground: bool, with_trees: bool, out_dir: &Path) -> Result<serde_json::Value> {
     let mut a = area(g, name, radius)?;
     if !ground { a.landscape.clear(); }
+    if !with_trees { a.trees.clear(); }
     let mut meshes = serde_json::Map::new();
     let mut warnings = vec![];
     let mut used: Vec<&str> = a.items.iter().map(|i| i.mesh.as_str()).chain(a.landscape.iter().map(String::as_str)).collect();
@@ -180,10 +193,41 @@ pub fn area_obj(g: &G3Ctx, name: &str, radius: f32, ground: bool, out_dir: &Path
         }
     }
     for (what, n) in &a.skipped { warnings.push(format!("left out {n}: {what}")); }
+    tree_stand_ins(g, &a.trees, out_dir, &mut meshes, &mut warnings)?;
     let mut v = serde_json::to_value(&a)?;
     v["meshes"] = serde_json::Value::Object(meshes);
     v["warnings"] = serde_json::to_value(warnings)?;
     Ok(v)
+}
+
+/// The stand-in of every tree kind among `trees` (OBJ, as the meshes) into `meshes`, by lowercase `.spt` stem.
+pub fn tree_stand_ins(g: &G3Ctx, trees: &[Item], out_dir: &Path, meshes: &mut serde_json::Map<String, serde_json::Value>, warnings: &mut Vec<String>) -> Result<()> {
+    let mut kinds: Vec<&str> = trees.iter().map(|t| t.mesh.as_str()).collect();
+    kinds.sort_by_key(|s| s.to_lowercase());
+    kinds.dedup_by_key(|s| s.to_lowercase());
+    for t in kinds {
+        match crate::speedtree::stand_in(g, t, out_dir) {
+            Ok(o) => { meshes.insert(t.to_lowercase(), serde_json::to_value(&o)?); }
+            Err(e) => warnings.push(format!("{t}: {e:#}")),
+        }
+    }
+    Ok(())
+}
+
+/// The trees standing in `areas` (x, z min / max, cm): they are all placed in the static cells.
+pub fn trees_in(g: &G3Ctx, areas: &[[f32; 4]]) -> Vec<Item> {
+    let inside = |x: f32, z: f32, m: f32| areas.iter().any(|a| x >= a[0] - m && x <= a[2] + m && z >= a[1] - m && z <= a[3] + m);
+    let mut out = vec![];
+    for k in g.keys().into_iter().filter(|k| k.starts_with(ROOT) && k.contains("/sysdyn_") && k.ends_with("_cstat.node")) {
+        let Some(c) = cell_centre(&k) else { continue };
+        if !inside(c[0], c[1], CELL) { continue; }
+        let Ok(b) = g.read(&k) else { continue };
+        let src = stem(g.path_of(&k).unwrap_or(&k)).to_string();
+        for p in placements_with(&b, &[".spt"]).unwrap_or_default() {
+            if inside(p.world[12], p.world[14], 0.0) { out.push(Item { mesh: p.mesh[..p.mesh.len() - 4].to_string(), source: src.clone(), world: p.world }); }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -212,6 +256,9 @@ mod tests {
         let statics = a.items.iter().filter(|i| i.source.to_lowercase().ends_with("_cstat")).count();
         eprintln!("ardea: centre {:?}, {} own, {statics} static, landscape {:?}, skipped {:?}", a.center, own.items.len(), a.landscape, a.skipped);
         assert!(statics > 20 && !a.landscape.is_empty());
+        // Its trees, every kind a recipe of the game.
+        assert!(a.trees.len() > 5, "{} trees", a.trees.len());
+        for t in &a.trees { assert!(g.find("speedtrees", &format!("{}.spt", t.mesh)).is_some(), "{t:?}"); }
         for i in &a.items { assert!(i.world.iter().all(|x| x.is_finite()) && crate::staticmesh::mesh_key(&g, &i.mesh).is_some(), "{i:?}"); }
     }
 

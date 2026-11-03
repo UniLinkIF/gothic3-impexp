@@ -28,6 +28,11 @@
   (`G3_World_Landscape_Lowpoly_*`) over moved ground take the edit's height difference, their triangles there split
   to 8 m (shared across neighbours, so no cracks; uvs, colours and the second uv set from the triangle they lie in).
   The rest of a tile does not move.
+- **Trees** in the World Layer and Terrain imports: every SpeedTree of the static cells around (all 57 380 of the
+  game's trees are placed there) as a stand-in to look at — a bark cylinder and three crossed cards of the game's leaf
+  atlas (alpha test 64), as tall as the tree's recipe (`.spt`, size in metres), placed and scaled like the game's. In a
+  collection of their own, marked `g3_view_only`; the model export leaves them out. A `.spt` is only a recipe, so the
+  real tree is not built.
 - Model export: a replaced mesh with further uv sets (Varant's landscape cells) keeps them; before, they were lost.
 
 ## 0.9.10 — 2026-11-02

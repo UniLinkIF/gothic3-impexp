@@ -176,6 +176,24 @@ try:
     linked = len({o.data.name for o in obs}) < len(obs)
     check(r == {"FINISHED"} and at is not None and abs(at[0] - 897.8) < 0.2 and abs(at[1] + 126.7) < 0.2 and statics > 20 and ground > 0 and linked and not dup,
           f"world layer: {len(obs)} objects, {statics} static, {ground} ground, anvil at {at}, duplicate materials {dup[:3]}")
+    # 8a. Its trees: stand-ins in a collection of their own, marked for the view only, standing up (taller than wide),
+    #     leaves cut at alpha 64; the model export leaves them out.
+    tcol = next((c for c in bpy.data.collections if c.get("g3_view_only")), None)
+    tobs = list(tcol.objects) if tcol else []
+    tall = all(o.dimensions.z > 1.0 and o.get("g3_view_only") for o in tobs)
+    leaf = next((m for m in bpy.data.materials if m.name.startswith("SPT_Leaves_")), None)
+    check(len(tobs) >= 3 and tall and leaf is not None and leaf.get("g3_mask") == 64, f"trees: {len(tobs)} stand-ins, upright {tall}, leaf mask {leaf.get('g3_mask') if leaf else None}")
+    bpy.ops.object.select_all(action="DESELECT")
+    tobs[0].select_set(True)
+    bpy.context.view_layer.objects.active = tobs[0]
+    seen.clear()
+    core.run = spy
+    try:
+        r = bpy.ops.gothic3.export_mesh(name="Tree_Test", mode="package", folder=os.path.join(OUT, "tree_pkg"), title="Tree (test)")
+    except RuntimeError:
+        r = {"CANCELLED"}
+    core.run = orig
+    check(r == {"CANCELLED"} and "out" not in seen, f"a tree stand-in is not exported: {r}")
     if os.environ.get("G3_RENDER"):
         sc = bpy.context.scene
         cam = bpy.data.objects.new("cam", bpy.data.cameras.new("cam"))

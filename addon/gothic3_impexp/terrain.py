@@ -167,6 +167,7 @@ class G3_OT_import_terrain(bpy.types.Operator):
     cells: StringProperty(name="Клітинки", description="Назви клітинок через пробіл, напр. G3_Myrtana_Landscape_Cell_244 (досить кінця назви, напр. myrtana_landscape_cell_244)", search=_search, options={"SKIP_SAVE"})
     around_cursor: BoolProperty(name="Навколо 3D-курсора", description="Усі клітинки в радіусі від 3D-курсора (поставте його на місце, імпортоване як шар світу)", default=False)
     radius: FloatProperty(name="Радіус, м", default=50.0, min=0.0, max=2000.0)
+    with_trees: BoolProperty(name="Дерева", description="Дерева на клітинках — заглушки лише для огляду (стовбур і картки листя гри), не експортуються", default=True)
     scale: FloatProperty(name="Масштаб", description="Gothic 3 рахує в сантиметрах; 0.01 = метри Blender", default=0.01, min=1e-6)
 
     def invoke(self, context, event):
@@ -183,12 +184,22 @@ class G3_OT_import_terrain(bpy.types.Operator):
             return {"CANCELLED"}
         out_dir = os.path.join(core.cache_dir(), "terrain")
         try:
-            out = core.run("terrain", core.game_dir(), query, out_dir)
+            out = core.run("terrain", core.game_dir(), query, out_dir, *(["trees"] if self.with_trees else []))
         except core.CoreError as e:
             self.report({"ERROR"}, str(e))
             return {"CANCELLED"}
         ob = build_object(out, self.scale)
         context.collection.objects.link(ob)
+        from . import world
+        loaded = {}
+
+        def tree_mesh(stem):
+            k = stem.lower()
+            if k not in loaded:
+                info = out.get("tree_meshes", {}).get(k)
+                loaded[k] = world._load(info, self.scale) if info else None
+            return loaded[k]
+        trees = world.place_trees(out.get("trees", []), tree_mesh, self.scale, context.collection, ob.name)
         for o in context.selected_objects:
             o.select_set(False)
         ob.select_set(True)
@@ -196,7 +207,7 @@ class G3_OT_import_terrain(bpy.types.Operator):
         for w in out["warnings"][:5]:
             self.report({"WARNING"}, w)
         names = ", ".join(c["name"] for c in out["cells"])
-        self.report({"INFO"}, f"Рельєф: {len(out['cells'])} клітинок ({names}), {len(ob.data.vertices)} вершин")
+        self.report({"INFO"}, f"Рельєф: {len(out['cells'])} клітинок ({names}), {len(ob.data.vertices)} вершин, дерев {trees} (лише огляд)")
         return {"FINISHED"}
 
 

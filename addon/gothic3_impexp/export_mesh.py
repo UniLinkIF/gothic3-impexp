@@ -217,6 +217,11 @@ class G3_OT_export_mesh(bpy.types.Operator):
 
     def execute(self, context):
         selected = [o for o in context.selected_objects if o.type == "MESH"]
+        # Stand-ins brought in to look at (SpeedTree) are never models.
+        view_only = [o for o in selected if o.get("g3_view_only")]
+        if view_only:
+            self.report({"WARNING"}, f"Пропущено {len(view_only)} заглушок лише для огляду (дерева SpeedTree)")
+            selected = [o for o in selected if not o.get("g3_view_only")]
         # Objects named *_COL are the collision shape, *_CV the convex hulls (the bodies of items), the rest the model.
         col_objects = [o for o in selected if collision_kind(o.name) == "col"]
         cv_objects = [o for o in selected if collision_kind(o.name) == "cv"]

@@ -54,6 +54,28 @@ def _load(info, scale):
     return me, fix
 
 
+def place_trees(trees, mesh, scale, parent, name):
+    """SpeedTree stand-ins at their placements, in a collection of their own under `parent`, marked as for the view only
+    (`g3_view_only`: the exports leave them out). `mesh(stem)` gives (mesh, fix) as `_load` does. Returns how many."""
+    if not trees:
+        return 0
+    col = bpy.data.collections.new(f"{name} SpeedTree (огляд)")
+    parent.children.link(col)
+    col["g3_view_only"] = True
+    n = 0
+    for t in trees:
+        got = mesh(t["mesh"])
+        if got is None:
+            continue
+        ob = bpy.data.objects.new(f"SPT_{t['mesh']}", got[0])
+        ob.matrix_world = game_matrix_to_blender(t["world"], scale) @ got[1]
+        ob["g3_view_only"] = True
+        ob["g3_source"] = t["source"]
+        col.objects.link(ob)
+        n += 1
+    return n
+
+
 class G3_OT_import_world(bpy.types.Operator):
     bl_idname = "gothic3.import_world"
     bl_label = "Gothic 3 World Layer (.node)"
@@ -63,6 +85,7 @@ class G3_OT_import_world(bpy.types.Operator):
     name: StringProperty(name="Шар", description="Напр. ardea_dynamic_objects, faring_vegetation, geldern_items", search=_search_layer)
     radius: FloatProperty(name="Навколо, м", description="Будинки, скелі (статичні клітинки) і рельєф у цьому радіусі від середини шару; 0 = лише шар", default=40.0, min=0.0, max=500.0)
     with_ground: BoolProperty(name="Рельєф", description="Клітинки рельєфу під цим місцем", default=True)
+    with_trees: BoolProperty(name="Дерева", description="Дерева (SpeedTree) статичних клітинок у радіусі — заглушки лише для огляду: стовбур і схрещені картки листя гри, висотою як у рецепті", default=True)
     scale: FloatProperty(name="Масштаб", description="Gothic 3 рахує в сантиметрах; 0.01 = метри Blender", default=0.01, min=1e-6)
 
     def invoke(self, context, event):
@@ -73,7 +96,7 @@ class G3_OT_import_world(bpy.types.Operator):
             self.report({"ERROR"}, "Не вказано шар світу")
             return {"CANCELLED"}
         try:
-            lay = core.run("world", core.game_dir(), self.name, str(self.radius * 100.0), os.path.join(core.cache_dir(), "meshes"), *([] if self.with_ground else ["noground"]))
+            lay = core.run("world", core.game_dir(), self.name, str(self.radius * 100.0), os.path.join(core.cache_dir(), "meshes"), *([] if self.with_ground else ["noground"]), *([] if self.with_trees else ["notrees"]))
         except core.CoreError as e:
             self.report({"ERROR"}, str(e))
             return {"CANCELLED"}
@@ -111,10 +134,11 @@ class G3_OT_import_world(bpy.types.Operator):
                 ob["g3_source"] = "landscape"
                 col.objects.link(ob)
                 ground += 1
+        trees = place_trees(lay.get("trees", []), mesh, self.scale, col, lay["layer"])
         for w in lay["warnings"][:5]:
             self.report({"WARNING"}, w)
         kinds = sum(1 for v in loaded.values() if v)
-        self.report({"INFO"}, f"{lay['layer']}: {placed} моделей ({kinds} різних), клітинок рельєфу {ground}")
+        self.report({"INFO"}, f"{lay['layer']}: {placed} моделей ({kinds} різних), клітинок рельєфу {ground}, дерев {trees} (лише огляд)")
         return {"FINISHED"}
 
 

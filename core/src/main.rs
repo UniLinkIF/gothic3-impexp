@@ -24,7 +24,7 @@
 //! gothic3-core installed <game>                             mods installed from Blender
 //! gothic3-core uninstall <game> <mod>                       remove one
 //! gothic3-core world-layers <game>                         the world layers (.node stems) to pick from
-//! gothic3-core world <game> <layer> <radius cm> <out dir> [noground]
+//! gothic3-core world <game> <layer> <radius cm> <out dir> [noground] [notrees]
 //!                                                           a layer as context: its placements and, within the radius,
 //!                                                           the static cells' and the landscape, meshes as OBJ
 //! gothic3-core clip-variants <game> <clip>                the game's variants of the clip's action, the next free name
@@ -34,7 +34,9 @@
 //! gothic3-core export-lipsync <game> <spec.json> install <mod> | package <folder> <title> | mod <file.g3mod> <name> [author]
 //!                                                           a line's phones as its .xlip, where the game looks for it
 //! gothic3-core terrain-cells <game>                         the landscape cells: name, land, box over the ground
-//! gothic3-core terrain <game> <cells | @x,z,r> <out dir>    landscape cells to edit, with all they carry (.g3terrain)
+//! gothic3-core terrain <game> <cells | @x,z,r> <out dir> [trees]
+//!                                                           landscape cells to edit, with all they carry (.g3terrain);
+//!                                                           the trees on them as stand-ins to look at
 //! gothic3-core export-terrain <game> <spec.json> install <mod> | package <folder> <title>
 //!                                                           | mod <file.g3mod> <name> [author]
 //!                                                           the edited cells back (unchanged ones are left out)
@@ -57,6 +59,7 @@ mod glb;
 mod lightmap;
 mod lipsync;
 mod lowpoly;
+mod speedtree;
 mod staticmesh;
 mod terrain;
 mod textures;
@@ -216,7 +219,8 @@ fn run(args: &[String]) -> Result<serde_json::Value> {
         (Some("world"), Some(game)) => {
             let g = open(game)?;
             let radius: f32 = a(4).context("radius (cm)")?.parse().context("radius (cm)")?;
-            world::area_obj(&g, a(3).context("world layer")?, radius, a(6) != Some("noground"), Path::new(a(5).context("out dir")?))?
+            let flags = &args[args.len().min(6)..];
+            world::area_obj(&g, a(3).context("world layer")?, radius, !flags.iter().any(|f| f == "noground"), !flags.iter().any(|f| f == "notrees"), Path::new(a(5).context("out dir")?))?
         }
         (Some("clip-variants"), Some(game)) => serde_json::to_value(motion_write::variants(&g3::G3Ctx::open_original(Path::new(game))?, a(3).context("clip")?)?)?,
         (Some("lip-lines"), Some(game)) => serde_json::to_value(lipsync::lines(Path::new(game), a(3).unwrap_or("English"))?)?,
@@ -236,7 +240,18 @@ fn run(args: &[String]) -> Result<serde_json::Value> {
             // The cells as the game ships them: what the export compares with and writes over.
             let g = g3::G3Ctx::open_original(Path::new(game))?;
             let cells = terrain::select(&terrain::cells(&g)?, a(3).context("cells or @x,z,radius")?)?;
-            terrain::export_cells(&g, &cells, Path::new(a(4).context("out dir")?))?
+            let out_dir = Path::new(a(4).context("out dir")?);
+            let mut v = terrain::export_cells(&g, &cells, out_dir)?;
+            if a(5) == Some("trees") {
+                // The trees standing on the cells, as stand-ins to look at.
+                let trees = world::trees_in(&g, &cells.iter().map(|c| c.area).collect::<Vec<_>>());
+                let (mut meshes, mut warnings) = (serde_json::Map::new(), vec![]);
+                world::tree_stand_ins(&g, &trees, out_dir, &mut meshes, &mut warnings)?;
+                v["trees"] = serde_json::to_value(&trees)?;
+                v["tree_meshes"] = serde_json::Value::Object(meshes);
+                if let Some(w) = v["warnings"].as_array_mut() { w.extend(warnings.into_iter().map(serde_json::Value::from)); }
+            }
+            v
         }
         (Some("export-terrain"), Some(game)) => {
             // Cells are compared with, and written over, the game's own.
