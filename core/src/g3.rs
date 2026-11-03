@@ -23,18 +23,23 @@ const DIR_ATTR: u32 = 0x10;
 const DELETED_ATTR: u32 = 0x8000;
 
 #[derive(Debug, Clone)]
-pub struct G3Entry { pub path: String, pub full: String, pub offset: u64, pub stored: u64, pub size: u32, pub compression: u32, pub attributes: u32 }
+pub struct G3Entry { pub path: String, pub full: String, pub offset: u64, pub stored: u64, pub size: u32, pub compression: u32, pub attributes: u32, pub modified: u64 }
 
 impl G3Entry { pub fn is_deleted(&self) -> bool { self.attributes & DELETED_ATTR != 0 } }
 
 /// A volume a mod tool wrote — ours, a package's INSTALL.bat, a mod launcher's: its live files name, as their full
 /// path, their path inside the archive (`_compiledMesh\…`). The game's own volumes name the files on the developers'
 /// disks (`E:\Gothic III Work\bin\Data\…`, `#G3:/…` for removed ones), and a patch volume that only removes files
-/// has no live file at all.
+/// has no live file at all. A tool that writes full paths too is told apart by the files' dates: every live file of
+/// the 39 volumes the Steam game ships was made by January 2008 (the patches included), so one whose files all date
+/// from 2009 on is a mod's.
 pub fn is_mod_volume(entries: &[G3Entry]) -> bool {
     let live: Vec<&G3Entry> = entries.iter().filter(|e| !e.is_deleted()).collect();
-    !live.is_empty() && live.iter().all(|e| e.full.as_bytes().get(1) != Some(&b':') && !e.full.starts_with('#'))
+    !live.is_empty() && (live.iter().all(|e| e.full.as_bytes().get(1) != Some(&b':') && !e.full.starts_with('#')) || live.iter().all(|e| e.modified >= LATER_THAN_THE_GAME))
 }
+
+/// 2009-01-01 as a FILETIME (100 ns since 1601).
+pub const LATER_THAN_THE_GAME: u64 = 128_752_416_000_000_000;
 
 fn u32_<R: Read>(r: &mut R) -> std::io::Result<u32> { let mut b = [0u8; 4]; r.read_exact(&mut b)?; Ok(u32::from_le_bytes(b)) }
 fn u64_<R: Read>(r: &mut R) -> std::io::Result<u64> { let mut b = [0u8; 8]; r.read_exact(&mut b)?; Ok(u64::from_le_bytes(b)) }
@@ -65,8 +70,10 @@ pub fn read_volume(path: &Path) -> Result<Vec<G3Entry>> {
 
 fn node<R: Read>(f: &mut R, out: &mut Vec<G3Entry>, depth: u32) -> Result<()> {
     if depth > 64 { bail!("directory tree too deep"); }
+    // FILETIME created, accessed, modified · u64 0
     let mut times = [0u8; 32];
     f.read_exact(&mut times)?;
+    let modified = u64::from_le_bytes(times[16..24].try_into().unwrap());
     let attributes = u32_(f)?;
     if attributes & DIR_ATTR != 0 {
         let _name = name_(f)?;
@@ -81,7 +88,7 @@ fn node<R: Read>(f: &mut R, out: &mut Vec<G3Entry>, depth: u32) -> Result<()> {
         let compression = u32_(f)?;
         let path = name_(f)?;
         let full = name_(f)?;
-        out.push(G3Entry { path, full, offset, stored, size, compression, attributes });
+        out.push(G3Entry { path, full, offset, stored, size, compression, attributes, modified });
     }
     Ok(())
 }
@@ -190,6 +197,23 @@ mod tests {
             let k = g.keys().into_iter().find(|k| k.starts_with(group)).unwrap_or_else(|| panic!("no {group}"));
             assert_eq!(g.read(&k).unwrap().len() as u32, g.size_of(&k).unwrap(), "{k}");
         }
+    }
+
+    /// A volume whose files name absolute paths, as the game's do, is a mod's when all its files are later than the
+    /// game's; the dates are read where the game writes them (our own volume says when it was written).
+    #[test]
+    fn a_volume_with_full_paths_and_new_files_is_a_mod() {
+        let e = |full: &str, modified: u64| G3Entry { path: "_compiledmesh/x.xcmsh".into(), full: full.into(), offset: 0, stored: 0, size: 0, compression: 0, attributes: 0x20820, modified };
+        let (old, new) = (127_000_000_000_000_000, crate::volume::filetime_now());
+        assert!(!is_mod_volume(&[e(r"E:\Gothic III Work\bin\Data\_compiledMesh\x.xcmsh", old)]));
+        assert!(is_mod_volume(&[e(r"C:\Users\modder\MyMod\Data\_compiledMesh\x.xcmsh", new)]));
+        assert!(!is_mod_volume(&[e(r"C:\Users\modder\MyMod\x.xcmsh", new), e(r"E:\Release\y.xcmsh", old)]));
+        let dir = std::env::temp_dir().join(format!("g3ie_test_voltime_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("_compiledMesh.p09");
+        std::fs::write(&p, crate::volume::write("_compiledMesh", &[("a/b.xcmsh".into(), b"x".to_vec())], new)).unwrap();
+        assert_eq!(read_volume(&p).unwrap().iter().map(|e| e.modified).collect::<Vec<_>>(), vec![new]);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Every volume in the install is the game's own, except the ones our installed mods live in.
