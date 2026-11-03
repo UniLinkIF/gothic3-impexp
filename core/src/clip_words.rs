@@ -130,6 +130,23 @@ mod tests {
         assert_eq!(words, never, "{} of {n}", bad.len());
     }
 
+    /// The stance, hand and action tables are as long as the game's own enums: Game.dll names every value of
+    /// `gEAniState`, `gEUseType` and `gEAction` (`gEAniState_Stand`, …, `…_Count`), and the tables have one word per value
+    /// (the same name, or the animation word the game puts for it: `Plant` → `Bread`, `Broom` → `Staff`).
+    #[test]
+    fn the_tables_are_as_long_as_the_games_enums() {
+        let Ok(root) = std::env::var("G3_GAME") else { return };
+        let dll = std::fs::read(std::path::Path::new(&root).join("Game.dll")).unwrap();
+        let names = |prefix: &str| -> Vec<String> {
+            dll.split(|&b| b == 0).filter_map(|s| std::str::from_utf8(s).ok()).filter_map(|s| s.strip_prefix(prefix)).filter(|s| *s != "Count" && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')).map(String::from).collect()
+        };
+        for (prefix, table, same) in [("gEAniState_", STANCE, 30), ("gEUseType_", USE, 97), ("gEAction_", ACTION, 135)] {
+            let e = names(prefix);
+            assert_eq!(e.len(), table.len(), "{prefix}");
+            assert_eq!(e.iter().zip(table).filter(|(a, b)| a.eq_ignore_ascii_case(b)).count(), same, "{prefix}");
+        }
+    }
+
     #[test]
     fn names_are_composed_only_from_the_words() {
         let w = ["Stand", "None", "None", "P0", "Ambient", "Loop", "N", "Fwd"].map(String::from);
