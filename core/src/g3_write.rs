@@ -544,17 +544,17 @@ mod collision_game_tests {
 }
 
 #[cfg(test)]
-mod engine_tests {
-    /// The value the game's Engine.dll registers for each `eEShaderMaterialBlendMode` name (each name has a small
-    /// function: `push offset name` … `push value`).
-    fn blend_mode_values(dll: &[u8]) -> Vec<(String, u8)> {
+pub(crate) mod engine_tests {
+    /// The value the game's Engine.dll registers for each enum name starting with `prefix` (each name has a small
+    /// function of its own: `push ecx · push offset name` … `push value`), in the order the names are stored.
+    pub(crate) fn enum_values(dll: &[u8], prefix: &str) -> Vec<(String, u8)> {
         let pe = u32::from_le_bytes(dll[0x3c..0x40].try_into().unwrap()) as usize;
         let (nsec, opt) = (u16::from_le_bytes([dll[pe + 6], dll[pe + 7]]) as usize, u16::from_le_bytes([dll[pe + 20], dll[pe + 21]]) as usize);
         let base = u32::from_le_bytes(dll[pe + 52..pe + 56].try_into().unwrap());
         let secs: Vec<(u32, u32, u32)> = (0..nsec).map(|i| { let o = pe + 24 + opt + i * 40; let r = |k: usize| u32::from_le_bytes(dll[o + k..o + k + 4].try_into().unwrap()); (r(12), r(16), r(20)) }).collect();
         let va = |off: usize| secs.iter().find(|s| off as u32 >= s.2 && (off as u32) < s.2 + s.1).map(|s| base + s.0 + off as u32 - s.2);
         let mut out = vec![];
-        let pre = b"eEShaderMaterialBlendMode_";
+        let pre = prefix.as_bytes();
         let mut i = 0;
         while let Some(p) = dll[i..].windows(pre.len()).position(|w| w == pre).map(|p| p + i) {
             let end = p + dll[p..].iter().position(|&b| b == 0).unwrap();
@@ -562,7 +562,8 @@ mod engine_tests {
             if dll[p - 1] != 0 { continue; }
             let name = String::from_utf8_lossy(&dll[p + pre.len()..end]).into_owned();
             let push = [&[0x68u8][..], &va(p).unwrap().to_le_bytes()].concat();
-            let Some(c) = dll.windows(5).position(|w| w == push.as_slice()) else { continue };
+            // The registering function's own push (after padding and `push ecx`), not a table filled elsewhere.
+            let Some(c) = dll.windows(7).position(|w| w[0] == 0xcc && w[1] == 0x51 && w[2..] == push[..]).map(|c| c + 2) else { continue };
             // The first `push imm8` after it (Normal registers with two pushes of 0).
             if let Some(k) = (c + 5..c + 40).find(|&k| dll[k] == 0x6a) { out.push((name, dll[k + 1])); }
         }
@@ -575,7 +576,7 @@ mod engine_tests {
     fn the_engine_calls_blend_mode_7_brighten() {
         let Ok(root) = std::env::var("G3_GAME") else { return };
         let dll = std::fs::read(std::path::Path::new(&root).join("Engine.dll")).unwrap();
-        let v = blend_mode_values(&dll);
+        let v = enum_values(&dll, "eEShaderMaterialBlendMode_");
         let want: Vec<(String, u8)> = [("Normal", 0), ("Masked", 1), ("AlphaBlend", 2), ("Modulate", 3), ("AlphaModulate", 4), ("Translucent", 5), ("Brighten", 7), ("Darken", 6), ("Invisible", 8)].iter().map(|(n, x)| (n.to_string(), *x)).collect();
         assert_eq!(v, want);
         assert!(super::GLOW.blend == 7 && super::ACTOR_GLOW.blend == 7);

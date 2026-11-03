@@ -316,6 +316,35 @@ try:
     check(got and os.path.normcase(got) == os.path.normcase(os.path.join(tdir, "Moved_Wood.png")), f"moved image found: {got}")
     pr.texture_dirs.clear()
 
+    # 13. Boxes, capsules and spheres: *_COL_BOX / _CAPSULE / _SPHERE objects go into the placement sidecar as the game's
+    #     shapes (centimetres, game axes), not into the model.
+    import math
+    clear()
+    bpy.ops.mesh.primitive_cube_add(location=(0, 0, 0))
+    crate = bpy.context.active_object
+    crate.name = "PrimTest_Crate"
+    bpy.ops.mesh.primitive_cube_add(location=(2, 0, 1), rotation=(0, 0, math.radians(30)), scale=(1, 2, 0.5))
+    bpy.context.active_object.name = "PrimTest_Crate_COL_BOX"
+    bpy.ops.mesh.primitive_uv_sphere_add(radius=0.5, location=(0, 0, 3))
+    bpy.context.active_object.name = "PrimTest_Crate_COL_SPHERE"
+    bpy.ops.mesh.primitive_cylinder_add(radius=0.25, depth=2, location=(0, 1, 0))
+    bpy.context.active_object.name = "PrimTest_Crate_COL_CAPSULE"
+    bpy.ops.object.select_all(action="SELECT")
+    bpy.context.view_layer.objects.active = crate
+    seen.clear()
+    core.run = spy
+    r = bpy.ops.gothic3.export_mesh(name="PrimTest_Crate", mode="package", folder=os.path.join(OUT, "prim_pkg"), title="Prims (test)", collision="model")
+    core.run = orig
+    rep = seen.get("out", {}).get("report", {})
+    shapes = {s["kind"]: s for s in rep.get("placement", {}).get("eCCollisionShape_PS", {}).get("shapes", [])}
+    near = lambda a, b, t=0.5: all(abs(x - y) <= t for x, y in zip(a, b))
+    box, sph, cap = shapes.get("box", {}), shapes.get("sphere", {}), shapes.get("capsule", {})
+    ok = (r == {"FINISHED"} and rep.get("triangles") == 12 and box.get("ShapeType") == 3 and near(box.get("center", []), [200, 100, 0]) and near(box.get("half_extents", []), [100, 200, 50])
+          and near(box.get("axes", [[]])[0], [math.cos(math.radians(30)), 0, math.sin(math.radians(30))], 0.01)
+          and sph.get("ShapeType") == 5 and abs(sph.get("radius", 0) - 50) < 0.5 and near(sph.get("center", []), [0, 300, 0])
+          and cap.get("ShapeType") == 4 and abs(cap.get("radius", 0) - 25) < 0.5 and abs(cap.get("height", 0) - 150) < 0.5 and near(cap.get("axes", [[], []])[1], [0, 1, 0], 0.01))
+    check(ok, f"primitives: box {box.get('center')} {box.get('half_extents')}, sphere {sph.get('radius')}, capsule {cap.get('radius')} {cap.get('height')}, triangles {rep.get('triangles')}")
+
 except Exception:
     traceback.print_exc()
     fails.append("exception")

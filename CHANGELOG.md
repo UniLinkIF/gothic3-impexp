@@ -30,6 +30,9 @@
   placement's lightmap a page per chart at that placement's texel size, its light taken from the old pages at the same
   place. Unchanged parts now also keep the game's charts in the mesh, which the pages they keep belong to (the last
   release wrote them without).
+- Boxes, capsules and spheres for the collision: objects named `*_COL_BOX`, `*_COL_CAPSULE`, `*_COL_SPHERE` (Blender's
+  cube, cylinder or capsule, UV sphere — moved, turned and scaled as you like) go into the placement sidecar as the
+  game's shapes 3, 4 and 5, with their sizes and the shape's data as the game writes it; they are not part of the model.
 - The glow look's blend mode 7 is the engine's own `Brighten` (read from Engine.dll, where 6 is `Darken`).
 - Import keeps the game's double-sided faces (a second face on the same three corners), which Blender's OBJ importer
   dropped.

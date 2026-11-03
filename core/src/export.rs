@@ -104,8 +104,16 @@ pub struct UvSpec { pub stream: u32, pub geometry: String }
 #[derive(Deserialize, Default)]
 pub struct FarSpec { pub geometry: String, pub corners: usize, pub materials: Vec<MatSpec>, #[serde(default)] pub uv_extra: Vec<UvSpec> }
 
+/// A box, capsule or sphere of the collision (`*_COL_BOX`, `*_COL_CAPSULE`, `*_COL_SPHERE` objects), game axes, cm:
+/// `axes` rows (a box's axis k; a capsule's length is row 1), `half` a box's half extents, `height` a capsule's straight
+/// part. For the placement sidecar: an entity holds these shapes itself, no file.
+#[derive(Deserialize)]
+pub struct PrimSpec { pub kind: String, pub center: [f32; 3], #[serde(default = "identity")] pub axes: [[f32; 3]; 3], #[serde(default)] pub half: [f32; 3], #[serde(default)] pub radius: f32, #[serde(default)] pub height: f32, #[serde(default)] pub material: Option<MatSpec> }
+
+fn identity() -> [[f32; 3]; 3] { [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] }
+
 #[derive(Deserialize, Default)]
-pub struct Spec { pub name: String, pub geometry: String, pub corners: usize, pub materials: Vec<MatSpec>, pub collision: Option<CollisionSpec>, #[serde(default)] pub uv_extra: Vec<UvSpec>, #[serde(default)] pub lowpoly: Option<FarSpec> }
+pub struct Spec { pub name: String, pub geometry: String, pub corners: usize, pub materials: Vec<MatSpec>, pub collision: Option<CollisionSpec>, #[serde(default)] pub uv_extra: Vec<UvSpec>, #[serde(default)] pub lowpoly: Option<FarSpec>, #[serde(default)] pub primitives: Vec<PrimSpec> }
 
 #[derive(serde::Serialize, Default)]
 pub struct Report { pub name: String, pub replaced: bool, pub vertices: usize, pub triangles: usize, pub materials: Vec<String>, pub collision: Option<String>, pub convex: Option<String>, pub lightmaps: usize, pub pages_kept: usize, pub pages_rebaked: usize, pub lods: Vec<String>, pub files: Vec<String>, pub warnings: Vec<String>, pub placement: serde_json::Value }
@@ -714,7 +722,12 @@ pub fn build(g: &G3Ctx, spec: &Spec) -> Result<(Report, Vec<(String, String, Vec
     let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
     for p in parts.iter().flat_map(|p| &p.positions) { for k in 0..3 { lo[k] = lo[k].min(p[k]); hi[k] = hi[k].max(p[k]); } }
     let far_path = targets.iter().find(|t| t.1.to_lowercase().ends_with("_lowpoly.xcmsh")).map(|t| t.1.clone());
-    r.placement = crate::placement::sidecar(&path, (lo, hi), far_path.as_deref(), &placed);
+    let prims: Vec<crate::placement::Prim> = spec.primitives.iter().map(|p| crate::placement::Prim {
+        shape_type: match p.kind.as_str() { "box" => crate::placement::BOX, "capsule" => crate::placement::CAPSULE, _ => crate::placement::SPHERE },
+        center: p.center, axes: p.axes, half: p.half, radius: p.radius, height: p.height,
+        material: p.material.as_ref().map_or(4, |m| shape_of(m, 4)),
+    }).collect();
+    r.placement = crate::placement::sidecar(&path, (lo, hi), far_path.as_deref(), &placed, &prims);
     r.files = files.iter().map(|(a, p, _)| format!("{a}/{p}")).collect();
     Ok((r, files))
 }
@@ -770,7 +783,7 @@ mod tests {
         let mats = || geo.submeshes.iter().map(|s| MatSpec { name: s.material.trim_end_matches(".xshmat").to_string(), ..Default::default() }).collect();
         let uv_extra = m.uv_extra.iter().zip(&x).map(|((ty, _), b)| { let f = dir.join(format!("uv{ty}.bin")); std::fs::write(&f, b).unwrap(); UvSpec { stream: *ty, geometry: f.to_string_lossy().into_owned() } }).collect();
         Spec { name: crate::stem_of(key), geometry: geof.to_string_lossy().into_owned(), corners: t.len() * 3, materials: mats(),
-            collision: Some(CollisionSpec { geometry: None, corners: None, material: Some("stone".into()), mode: Some(collision.into()), materials: vec![], convex: vec![] }), uv_extra, lowpoly: None }
+            collision: Some(CollisionSpec { geometry: None, corners: None, material: Some("stone".into()), mode: Some(collision.into()), materials: vec![], convex: vec![] }), uv_extra, lowpoly: None, primitives: vec![] }
     }
 
     /// The landscape cell written back from its own triangles: same colours, its one lightmap rebuilt to the

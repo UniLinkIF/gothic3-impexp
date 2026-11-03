@@ -18,6 +18,18 @@
 //!                         u16 74 · u16 file (string) · u16 part index · u16 1 · f32 box min[3] max[3] · 12 bytes 0
 //! ```
 //! An enum is `u16 1 · u32 value`. Boxes are in the model's own centimetres; a hull's is empty (FLT_MAX, −FLT_MAX).
+//!
+//! Shapes without a file (the engine's `eECollisionShapeType`: 0 None, 1 TriMesh, 2 Plane, 3 Box, 4 Capsule, 5 Sphere,
+//! 6 ConvexHull, 7 Point — read from Engine.dll), in the model's centimetres:
+//! ```text
+//! box (3), 100 bytes:     u16 74 · f32 centre[3] · f32 half extents[3] · f32 axes[9] (row k = the box's axis k)
+//! capsule (4), 96 bytes:  u16 74 · f32 radius · f32 height (of the straight part) · f32 axes[9] (row 1 = its length)
+//!                         · f32 centre[3]
+//! sphere (5), 56 bytes:   u16 74 · f32 radius · f32 centre[3]
+//!                         then, for all three: u16 1 · f32 box min[3] max[3] · 12 bytes 0
+//! ```
+//! A box's and a sphere's box are their own bounds (98 % / 100 % of the game's); a capsule's box is not its bounds in
+//! the game's files (flat across), so the sidecar gives the capsule's own bounds there.
 
 use anyhow::{bail, Result};
 
@@ -96,12 +108,65 @@ pub fn collisions(d: &[u8]) -> Result<Vec<Collision>> {
 pub const TRIANGLE_MESH: u32 = 1;
 pub const CONVEX_HULL: u32 = 6;
 
+/// A box, capsule or sphere of the model's collision (centimetres, game axes). `axes`: rows, as stored.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Prim { pub shape_type: u32, pub center: [f32; 3], pub axes: [[f32; 3]; 3], pub half: [f32; 3], pub radius: f32, pub height: f32, pub material: u8 }
+
+pub const BOX: u32 = 3;
+pub const CAPSULE: u32 = 4;
+pub const SPHERE: u32 = 5;
+
+impl Prim {
+    /// Its bounds: a box's axis k reaches half[k] along row k; a capsule is a box of its radius around a segment of its
+    /// height along row 1.
+    pub fn bounds(&self) -> ([f32; 3], [f32; 3]) {
+        let reach: [f32; 3] = match self.shape_type {
+            BOX => [0, 1, 2].map(|i| (0..3).map(|k| (self.axes[k][i] * self.half[k]).abs()).sum()),
+            CAPSULE => [0, 1, 2].map(|i| (self.axes[1][i] * self.height / 2.0).abs() + self.radius),
+            _ => [self.radius; 3],
+        };
+        ([0, 1, 2].map(|i| self.center[i] - reach[i]), [0, 1, 2].map(|i| self.center[i] + reach[i]))
+    }
+
+    /// The shape's own data as the game writes it (`bounds` as its box).
+    pub fn data(&self) -> Vec<u8> {
+        let mut f: Vec<f32> = vec![];
+        let axes = self.axes.iter().flatten().copied();
+        match self.shape_type {
+            BOX => { f.extend(self.center); f.extend(self.half); f.extend(axes); }
+            CAPSULE => { f.extend([self.radius, self.height]); f.extend(axes); f.extend(self.center); }
+            _ => { f.push(self.radius); f.extend(self.center); }
+        }
+        let b = self.bounds();
+        let mut o = 74u16.to_le_bytes().to_vec();
+        for x in f { o.extend(x.to_le_bytes()); }
+        o.extend(1u16.to_le_bytes());
+        for x in b.0.iter().chain(&b.1) { o.extend(x.to_le_bytes()); }
+        o.extend([0u8; 12]);
+        o
+    }
+
+    /// A shape of the game's from its data.
+    pub fn parse(shape_type: u32, material: u8, d: &[u8]) -> Option<Prim> {
+        let n = match shape_type { BOX => 15, CAPSULE => 14, SPHERE => 4, _ => return None };
+        if d.len() != 2 + n * 4 + 38 || d[..2] != [74, 0] { return None; }
+        let f: Vec<f32> = (0..n).map(|i| f32::from_le_bytes(d[2 + i * 4..6 + i * 4].try_into().unwrap())).collect();
+        let axes = |a: &[f32]| [[a[0], a[1], a[2]], [a[3], a[4], a[5]], [a[6], a[7], a[8]]];
+        let id = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        Some(match shape_type {
+            BOX => Prim { shape_type, center: [f[0], f[1], f[2]], half: [f[3], f[4], f[5]], axes: axes(&f[6..15]), radius: 0.0, height: 0.0, material },
+            CAPSULE => Prim { shape_type, radius: f[0], height: f[1], axes: axes(&f[2..11]), center: [f[11], f[12], f[13]], half: [0.0; 3], material },
+            _ => Prim { shape_type, radius: f[0], center: [f[1], f[2], f[3]], axes: id, half: [0.0; 3], height: 0.0, material },
+        })
+    }
+}
+
 /// A part of the model's collision as the sidecar names it.
 pub struct Part { pub shape_type: u32, pub file: String, pub part: usize, pub material: u8, pub bounds: ([f32; 3], [f32; 3]) }
 
 /// The sidecar: the mesh, its box, the far version, and per collision part the shape an entity needs, with the values
 /// the game's own entities give such shapes.
-pub fn sidecar(mesh_path: &str, bounds: ([f32; 3], [f32; 3]), far: Option<&str>, parts: &[Part]) -> serde_json::Value {
+pub fn sidecar(mesh_path: &str, bounds: ([f32; 3], [f32; 3]), far: Option<&str>, parts: &[Part], prims: &[Prim]) -> serde_json::Value {
     let file = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
     let bx = |b: &([f32; 3], [f32; 3])| serde_json::json!({ "min": b.0, "max": b.1 });
     let shapes: Vec<serde_json::Value> = parts.iter().map(|p| {
@@ -115,7 +180,24 @@ pub fn sidecar(mesh_path: &str, bounds: ([f32; 3], [f32; 3]), far: Option<&str>,
             "TriggersOnTouch": false, "TriggersOnUntouch": false, "TriggersOnIntersect": false, "IsLazyGenerated": false,
             "box": if mesh { bx(&p.bounds) } else { bx(&crate::g3_write::EMPTY_BOX) },
         })
-    }).collect();
+    }).chain(prims.iter().map(|p| {
+        let kind = match p.shape_type { BOX => "box", CAPSULE => "capsule", _ => "sphere" };
+        let mut s = serde_json::json!({
+            "ShapeType": p.shape_type, "kind": kind, "center": p.center,
+            "Material": p.material, "surface": crate::g3_write::SHAPE_MATERIALS.get(p.material as usize).copied().unwrap_or("none"),
+            "Group": 1, "ShapeAABBAdaptMode": 0, "SkinWidth": -1.0, "FileVersion": 74,
+            "IgnoredByTraceRay": false, "EnableCCD": false, "OverrideEntityAABB": false, "DisableCollision": false, "DisableResponse": false,
+            "TriggersOnTouch": false, "TriggersOnUntouch": false, "TriggersOnIntersect": false, "IsLazyGenerated": false,
+            "box": bx(&p.bounds()),
+            "data_hex": p.data().iter().map(|b| format!("{b:02x}")).collect::<String>(),
+        });
+        match p.shape_type {
+            BOX => { s["half_extents"] = serde_json::json!(p.half); s["axes"] = serde_json::json!(p.axes); }
+            CAPSULE => { s["radius"] = serde_json::json!(p.radius); s["height"] = serde_json::json!(p.height); s["axes"] = serde_json::json!(p.axes); }
+            _ => { s["radius"] = serde_json::json!(p.radius); }
+        }
+        s
+    })).collect();
     serde_json::json!({
         "format": "Gothic 3 ImpExp placement 1",
         "mesh": { "ResourceFileName": file(mesh_path), "path": format!("_compiledMesh/{mesh_path}"), "box_cm": bx(&bounds) },
@@ -124,7 +206,8 @@ pub fn sidecar(mesh_path: &str, bounds: ([f32; 3], [f32; 3]), far: Option<&str>,
         "notes": [
             "Coordinates: centimetres, the game's axes (left-handed, Y up), the model's own origin.",
             "One eCCollisionShape per part, in this order: the world names a part by its index in the file and gives it the surface here; a part left out has no collision.",
-            "A new placement has no lightmap of its own: the mesh's vertex colours light it."
+            "A new placement has no lightmap of its own: the mesh's vertex colours light it.",
+            "Boxes, capsules and spheres (from *_COL_BOX / *_COL_CAPSULE / *_COL_SPHERE objects) come after the file parts; data_hex is the shape's own data as the game writes it."
         ],
     })
 }
@@ -133,6 +216,50 @@ pub fn sidecar(mesh_path: &str, bounds: ([f32; 3], [f32; 3]), far: Option<&str>,
 mod tests {
     use super::*;
     use std::collections::{BTreeMap, HashMap};
+
+    /// The game's boxes, capsules and spheres read as `Prim`, and written again they are the game's bytes — but for
+    /// the box at the end, which is theirs for boxes and spheres (to the rounding of the game's) and not for capsules.
+    #[test]
+    fn the_worlds_boxes_capsules_and_spheres_write_back() {
+        let Ok(root) = std::env::var("G3_GAME") else { return };
+        let g = crate::g3::G3Ctx::open_original(std::path::Path::new(&root)).unwrap();
+        let mut n: BTreeMap<u32, (usize, usize, usize)> = BTreeMap::new();
+        for k in g.keys().into_iter().filter(|k| k.starts_with("projects_compiled/") && k.ends_with(".node")) {
+            let d = g.read(&k).unwrap();
+            if !d.starts_with(b"GENOMFLE") { continue; }
+            for c in collisions(&d).unwrap() {
+                for s in c.shapes.iter().filter(|s| [BOX, CAPSULE, SPHERE].contains(&s.shape_type)) {
+                    let p = Prim::parse(s.shape_type, s.material as u8, &s.data).unwrap_or_else(|| panic!("{k}: shape {} of {} bytes", s.shape_type, s.data.len()));
+                    let ours = p.data();
+                    let e = n.entry(s.shape_type).or_default();
+                    e.0 += 1;
+                    let cut = ours.len() - 38;
+                    if ours[..cut] == s.data[..cut] && ours[cut..cut + 2] == s.data[cut..cut + 2] && ours[ours.len() - 12..] == s.data[s.data.len() - 12..] { e.1 += 1; }
+                    let f = |b: &[u8], i: usize| f32::from_le_bytes(b[cut + 2 + i * 4..cut + 6 + i * 4].try_into().unwrap());
+                    if (0..6).all(|i| (f(&ours, i) - f(&s.data, i)).abs() < 1.0) { e.2 += 1; }
+                }
+            }
+        }
+        eprintln!("(shapes, same data, same box) by type: {n:?}");
+        let (b, c, s) = (n[&BOX], n[&CAPSULE], n[&SPHERE]);
+        assert!(b.0 > 5000 && c.0 > 2000 && s.0 > 1000);
+        assert!(b.1 == b.0 && c.1 == c.0 && s.1 == s.0, "{n:?}");
+        assert!(b.2 * 100 >= b.0 * 98 && s.2 == s.0, "{n:?}");
+    }
+
+    /// The shape types and groups the sidecar writes are the engine's: Engine.dll registers each name with its value.
+    #[test]
+    fn the_engines_shape_types_and_groups() {
+        let Ok(root) = std::env::var("G3_GAME") else { return };
+        let dll = std::fs::read(std::path::Path::new(&root).join("Engine.dll")).unwrap();
+        let v = crate::g3_write::engine_tests::enum_values(&dll, "eECollisionShapeType_");
+        assert_eq!(v, [("Box", 3), ("TriMesh", 1), ("ConvexHull", 6), ("None", 0), ("Plane", 2), ("Capsule", 4), ("Sphere", 5), ("Point", 7)].map(|(a, b)| (a.to_string(), b)).to_vec());
+        let shape = crate::g3_write::engine_tests::enum_values(&dll, "eEShapeGroup_");
+        assert!(shape.contains(&("Static".into(), 1)) && shape.contains(&("Tree_Trunk".into(), 9)) && shape.contains(&("Camera_Obstacle".into(), 17)), "{shape:?}");
+        let coll = crate::g3_write::engine_tests::enum_values(&dll, "eECollisionGroup_");
+        assert!(coll.contains(&("Static".into(), 1)) && coll.contains(&("Tree".into(), 12)), "{coll:?}");
+        assert_eq!((TRIANGLE_MESH, CONVEX_HULL, BOX, CAPSULE, SPHERE), (1, 6, 3, 4, 5));
+    }
 
     /// Every collision property set of every compiled world layer reads to its end. The shapes with a file — triangle
     /// meshes and convex hulls — name the part by its index in the file; a mesh part's box is that part's box in the

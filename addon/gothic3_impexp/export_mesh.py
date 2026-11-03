@@ -36,6 +36,42 @@ def collision_kind(name):
     return m.group(1).lower() if m else None
 
 
+# Boxes, capsules and spheres of the collision: an entity placing the model holds them itself (the placement sidecar).
+_PRIM = re.compile(r"_col_(box|capsule|sphere)(\.\d+)?$", re.IGNORECASE)
+
+
+def prim_kind(name):
+    """'box', 'capsule' or 'sphere' for a *_COL_BOX / *_COL_CAPSULE / *_COL_SPHERE object, else None."""
+    m = _PRIM.search(name)
+    return m.group(1).lower() if m else None
+
+
+def primitive(ob, scale):
+    """A *_COL_BOX / _CAPSULE / _SPHERE object as the game's shape (centimetres, game axes): its local bounds, placed and
+    turned as the object is. A capsule's length is the object's own Z (Blender's capsules and cylinders stand on Z)."""
+    kind = prim_kind(ob.name)
+    loc, rot, sca = ob.matrix_world.decompose()
+    lo = [min(c[k] for c in ob.bound_box) for k in range(3)]
+    hi = [max(c[k] for c in ob.bound_box) for k in range(3)]
+    from mathutils import Vector
+    centre = ob.matrix_world @ Vector([(lo[k] + hi[k]) / 2 for k in range(3)])
+    half = [(hi[k] - lo[k]) / 2 * abs(sca[k]) for k in range(3)]
+    r = rot.to_matrix()
+    game = lambda v: [v[0] / scale, v[2] / scale, v[1] / scale]
+    axis = lambda k: [r[0][k], r[2][k], r[1][k]]
+    m = ob.active_material
+    out = {"kind": kind, "center": game(centre), "axes": [axis(0), axis(1), axis(2)],
+           "material": {"name": m.name, **({"shape": m.g3_shape} if getattr(m, "g3_shape", "auto") != "auto" else {})} if m else None}
+    if kind == "box":
+        out["half"] = [half[0] / scale, half[1] / scale, half[2] / scale]
+    elif kind == "capsule":
+        radius = max(half[0], half[1])
+        out.update(axes=[axis(0), axis(2), axis(1)], radius=radius / scale, height=max(0.0, 2 * half[2] - 2 * radius) / scale)
+    else:
+        out["radius"] = max(half) / scale
+    return out
+
+
 # The far version the world's distance layer shows is named after its model with _LOWPOLY at the end.
 _FAR = re.compile(r"_lowpoly(\.\d+)?$", re.IGNORECASE)
 
@@ -291,9 +327,10 @@ class G3_OT_export_mesh(bpy.types.Operator):
         # Objects named *_COL are the collision shape, *_CV the convex hulls (the bodies of items), the rest the model.
         col_objects = [o for o in selected if collision_kind(o.name) == "col"]
         cv_objects = [o for o in selected if collision_kind(o.name) == "cv"]
-        # *_LOWPOLY objects are the far version.
-        far_objects = [o for o in selected if collision_kind(o.name) is None and is_far(o.name)]
-        objects = [o for o in selected if collision_kind(o.name) is None and not is_far(o.name)]
+        # *_LOWPOLY objects are the far version, *_COL_BOX / _CAPSULE / _SPHERE the collision's boxes, capsules, spheres.
+        prim_objects = [o for o in selected if prim_kind(o.name)]
+        far_objects = [o for o in selected if collision_kind(o.name) is None and not prim_kind(o.name) and is_far(o.name)]
+        objects = [o for o in selected if collision_kind(o.name) is None and not prim_kind(o.name) and not is_far(o.name)]
         # A model imported with its collision carries it as a *_COL / *_CV child: it goes along unselected (and so does
         # a *_LOWPOLY child).
         for o in objects:
@@ -305,6 +342,8 @@ class G3_OT_export_mesh(bpy.types.Operator):
                     cv_objects.append(c)
                 if kind is None and c.type == "MESH" and is_far(c.name) and c not in far_objects:
                     far_objects.append(c)
+                if prim_kind(c.name) and c not in prim_objects:
+                    prim_objects.append(c)
         if not objects or not self.name:
             self.report({"ERROR"}, "Виділіть меш і вкажіть назву моделі")
             return {"CANCELLED"}
@@ -316,6 +355,7 @@ class G3_OT_export_mesh(bpy.types.Operator):
                 return {"CANCELLED"}
             spec = os.path.join(tmp, "spec.json")
             doc = {"name": self.name, **_write_geometry(g, tmp, "model")}
+            doc["primitives"] = [primitive(o, self.scale) for o in sorted(prim_objects, key=lambda o: o.name)]
             fg = gather(context, far_objects, self.scale, tmp) if far_objects else None
             if fg is not None:
                 doc["lowpoly"] = _write_geometry(fg, tmp, "far")
