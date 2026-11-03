@@ -55,11 +55,12 @@ def _fcurves(action):
             bag = anim_utils.action_get_channelbag_for_slot(action, slot)
             if bag is not None:
                 out.append(bag.fcurves)
-        if out:
+        if out or not hasattr(action, "fcurves"):
             return out
     except (ImportError, AttributeError):
         pass
-    return [action.fcurves]
+    # Before Blender 4.4 (no slots); an action without slots in 5.x has no F-curves at all.
+    return [action.fcurves] if hasattr(action, "fcurves") else []
 
 
 class G3_OT_import_lipsync(bpy.types.Operator):

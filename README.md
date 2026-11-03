@@ -31,6 +31,7 @@ Import and export **Gothic 3** (Piranha Bytes, 2006, Genome engine) models, char
 | Gothic 3 Motion → Mod | a `.xmot` replacing one of the game's clips (by default the one the action came from) or a new clip beside it — as the next free variant of its action, or named from lists of the words the game composes clip names of (stance, hands, pose, action, phase, direction), so it is a name the game can ask for; IK and other constraints go in as their result; frame effects (footsteps, sounds) from the action's list, edited in the Gothic 3 tab |
 | Gothic 3 Terrain → Mod | the cells of a terrain object that changed (shape, painted colours, materials): mesh, collision from its triangles, lightmap, the distant land's tiles over the moved ground and its picture over the painted ground; a cell as it came out is left to the game |
 | Gothic 3 Lip-sync → Mod | a voice line's `.xlip` (in `Speech_<Language>`) from the face action: at every key, the nearest of the head's poses |
+| Gothic 3 New Creature → Mod | a creature of your own: `G3_<Word>_Body_01.xact` from your armature and mesh, and a clip `<Word>_….xmot` per action named from the game's words; bone names checked as the game's code expects them. It stands in the world once a template places it |
 | Gothic 3 Actor → Mod | a `.xact` — your mesh on a game skeleton (armour, bodies, heads, creatures; several Blender objects become its one mesh, a material each), weights from vertex groups |
 
 Mods go into the game as a patch volume per archive (`Data\_compiledMesh.pNN` and so on, after the game's own), the way

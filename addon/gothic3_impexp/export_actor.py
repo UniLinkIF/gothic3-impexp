@@ -31,8 +31,9 @@ def base_of(ob):
     return ob.get("g3_base") or _armature_of(ob)["g3_actor"]
 
 
-def gather_skinned(context, objects, scale, tmp):
-    """Rest-pose geometry of `objects` in game space, per-vertex bone weights (up to 8) and materials."""
+def gather_skinned(context, objects, scale, tmp, arm=None):
+    """Rest-pose geometry of `objects` in game space, per-vertex bone weights (up to 8) and materials. `arm`: the
+    armature whose space it is in (default: each object's Gothic 3 armature)."""
     mods = [m for o in objects for m in o.modifiers if m.type == "ARMATURE"]
     saved = [(m, m.show_viewport) for m in mods]
     for m, _ in saved:
@@ -49,7 +50,7 @@ def gather_skinned(context, objects, scale, tmp):
             try:
                 # Into the armature's space: the game keeps the base actor's skeleton where it is, so where the
                 # character stands in the scene must not move its skin.
-                m = _armature_of(ob).matrix_world.inverted() @ ob.matrix_world
+                m = (arm or _armature_of(ob)).matrix_world.inverted() @ ob.matrix_world
                 me.transform(m)
                 if m.determinant() < 0:
                     me.flip_normals()

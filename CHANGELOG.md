@@ -45,6 +45,18 @@
   199): vertices of a part that differ only by rounding sometimes matched another group than the one standing for them.
 - Import keeps the game's double-sided faces (a second face on the same three corners), which Blender's OBJ importer
   dropped.
+- The actor export lays an actor out as the game's: the default material first and the others numbered from 1, the
+  material map after the FXA and the `.xshmat` table matching the new mesh (before, the map and table stayed the
+  template's while the materials moved by one). An actor that carries its levels of detail gets the new mesh in each,
+  and replacing one also replaces its `_lod1`/`_lod2` beside it.
+- **Export → Gothic 3 New Creature → Mod**: an armature of your own with its mesh and actions becomes a creature:
+  `G3_<Word>_Body_01.xact` (`_Skeleton` without a mesh) and clips `<Word>_<words of the game>.xmot`, as the engine ties
+  clips to actors. Bones are checked against what the game's code expects (`<Word>_Head_Head_1`, `<Word>_Spine_Spine_1`,
+  `<Word>_Left_…`/`<Word>_Right_…`, the `Slot_…` bones); actions not named from the game's words are left out. Bones can
+  carry rotation limits and physics shapes (`g3_limit`, `g3_shape`). The creature needs a template to stand in the world.
+- Actors and clips are written from their parts: every one of the game's 379 actors and 5 752 clips, read into its
+  fields and written again, is the same file to the byte; a clip written from its tracks alone keeps keys only where
+  the motion bends, as the game's (within 0.01 cm and 0.06° of the game's own clips).
 - **Import → Gothic 3 Terrain**: landscape cells by name or around the 3D cursor, as one mesh welded across the
   cells' borders, with all a cell carries: the game's materials, its uv map, its colours as corner colour attributes
   (`g3_diffuse`, whose alpha blends the ground layers, and `g3_light`, the baked brightness), Varant's three further uv
@@ -58,7 +70,8 @@
   move by bones: each animated head has a clip of 15 poses (`<head>_LipSync`), each line a timeline of phones
   (`.xlip`, in the speech archive), and a phone shows its pose.
 - The unknown u32 at 32 of an actor is the size of the source it was compiled from: the FXA's length in every actor
-  compiled since August 2006 (the 66 that differ are all older). The actor export writes that, as before; now a test
+  compiled since August 2006 (the 66 that differ are all older, and they are exactly the actors that carry their
+  `_lod1`/`_lod2` inside the same file). The actor export writes that, as before; now a test
   holds it.
 - Lip-sync follows the game's own rule (Engine.dll builds a line's motion from key number `phone` of every key array
   of the head's clip with at least 14 keys; shorter ones stay still), so a few short position tracks no longer move.

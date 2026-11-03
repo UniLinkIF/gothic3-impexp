@@ -5,7 +5,7 @@ collision has no _COL, an actor. Writes only into the folder given after `--` (m
 
 The add-on must be enabled-able in that Blender (installed, or linked into its scripts/addons); the game folder is
 G3_GAME or the Steam default. Ends with "RESULT DONE fails: []" when all is well."""
-import bpy, os, sys, json, tempfile, traceback
+import bpy, os, sys, json, shutil, tempfile, traceback
 S = sys.argv[sys.argv.index("--") + 1]
 import addon_utils
 addon_utils.enable("gothic3_impexp", default_set=True)
@@ -533,6 +533,117 @@ try:
     same = len(want) == len(got) and all(a[1] == b[1] and abs(a[0] - b[0]) < 1e-4 for a, b in zip(want, got))
     wrong = [(a, b) for a, b in zip(want, got) if a[1] != b[1] or abs(a[0] - b[0]) >= 1e-4][:3]
     check(r == {"FINISHED"} and same and os.path.isfile(os.path.join(OUT, "lip_pkg", "Speech_English.vol")), f"lip-sync back: {len(got)} of {len(want)} phones, first wrong {wrong}")
+    # 11. A creature made from nothing: an armature Mole with its head, spine and arms, a mesh weighted to it with a
+    #     new material, two actions (one named from the game's words, one not). Exported into a copy of the game made
+    #     of links (never the game itself), then brought back as the game would: the actor and its clip.
+    from gothic3_impexp import export_creature, import_actor
+    from mathutils import Matrix
+    clear()
+    real_game = pr.game_dir
+    fake = os.path.join(tempfile.gettempdir(), f"g3ie_fake_{os.getpid()}")
+    shutil.rmtree(fake, ignore_errors=True)
+    os.makedirs(os.path.join(fake, "Data"))
+    for f in os.listdir(os.path.join(real_game, "Data")):
+        src = os.path.join(real_game, "Data", f)
+        if os.path.isfile(src):
+            os.link(src, os.path.join(fake, "Data", f))
+    try:
+        bpy.ops.object.armature_add(location=(0, 0, 0))
+        arm = bpy.context.active_object
+        arm.name = "Mole"
+        bpy.ops.object.mode_set(mode="EDIT")
+        eb = arm.data.edit_bones
+        root = eb[0]
+        root.name, root.head, root.tail = "Mole_ROOT", (0, 0, 0), (0, 0, 0.3)
+        def bone(name, parent, head, tail):
+            b = eb.new(name)
+            b.head, b.tail, b.parent = head, tail, eb[parent]
+            return b
+        bone("Mole_Spine_Spine_1", "Mole_ROOT", (0, 0, 0.3), (0, 0, 0.8))
+        bone("Mole_Head_Head_1", "Mole_Spine_Spine_1", (0, 0, 0.8), (0, 0, 1.1))
+        bone("Mole_Left_Arm_Arm_1", "Mole_Spine_Spine_1", (0.1, 0, 0.7), (0.5, 0, 0.7))
+        bone("Mole_Right_Arm_Arm_1", "Mole_Spine_Spine_1", (-0.1, 0, 0.7), (-0.5, 0, 0.7))
+        bpy.ops.object.mode_set(mode="OBJECT")
+        bpy.ops.mesh.primitive_cube_add(size=1.0, location=(0, 0, 0.6))
+        body = bpy.context.active_object
+        body.name = "Mole_Body"
+        bpy.ops.object.transform_apply(location=True, scale=True)
+        img = bpy.data.images.new("mole_skin", 8, 8)
+        img.pixels = [0.4, 0.3, 0.2, 1.0] * 64
+        mat = bpy.data.materials.new("Mole_Fur")
+        mat.use_nodes = True
+        tex = mat.node_tree.nodes.new("ShaderNodeTexImage")
+        tex.image = img
+        bsdf = next(n for n in mat.node_tree.nodes if n.type == "BSDF_PRINCIPLED")
+        mat.node_tree.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
+        body.data.materials.append(mat)
+        for name in ("Mole_Spine_Spine_1", "Mole_Head_Head_1"):
+            body.vertex_groups.new(name=name)
+        for v in body.data.vertices:
+            body.vertex_groups["Mole_Head_Head_1" if v.co.z > 0.6 else "Mole_Spine_Spine_1"].add([v.index], 1.0, "REPLACE")
+        body.parent = arm
+        md = body.modifiers.new("Armature", "ARMATURE")
+        md.object = arm
+        arm.data.bones["Mole_Head_Head_1"]["g3_shape"] = [1, 0, 0, 0, 20, 20, 30, 10, 0]
+        # Actions: the head nods (frames 1-21, 40 degrees at 11); one more under a name the game never composes.
+        arm.animation_data_create()
+        def action(name, angle):
+            a = bpy.data.actions.new(name)
+            arm.animation_data.action = a
+            pb = arm.pose.bones["Mole_Head_Head_1"]
+            pb.rotation_mode = "QUATERNION"
+            for f, ang in ((1, 0.0), (11, angle), (21, 0.0)):
+                pb.rotation_quaternion = Matrix.Rotation(ang, 4, "X").to_quaternion()
+                pb.keyframe_insert("rotation_quaternion", frame=f)
+            a.use_fake_user = True
+            return a
+        action("Dig", 0.3)
+        nod = action("Stand_None_None_P0_Ambient_Loop_N_Fwd_01", 0.698)
+        # The nod as a turn from the rest pose (each armature has its own bone axes at rest).
+        def turn(a):
+            # From the action's first frame to ten frames on (the import starts a clip where its time 0 lands).
+            f0 = int(round(a.animation_data.action.frame_range[0]))
+            bpy.context.scene.frame_set(f0)
+            q1 = (a.matrix_world @ a.pose.bones["Mole_Head_Head_1"].matrix).to_quaternion()
+            bpy.context.scene.frame_set(f0 + 10)
+            q11 = (a.matrix_world @ a.pose.bones["Mole_Head_Head_1"].matrix).to_quaternion()
+            bpy.context.scene.frame_set(1)
+            return q11 @ q1.inverted()
+        want = turn(arm)
+        pr.game_dir = fake
+        bpy.ops.object.select_all(action="DESELECT")
+        arm.select_set(True)
+        bpy.context.view_layer.objects.active = arm
+        seen.clear()
+        def spy_c(cmd, *args):
+            out = orig(cmd, *args)
+            if cmd == "export-creature":
+                seen["out"] = out
+            return out
+        core.run = spy_c
+        r = bpy.ops.gothic3.export_creature(word="Mole", mode="install")
+        core.run = orig
+        rep = seen.get("out", {}).get("report", {})
+        check(r == {"FINISHED"} and rep.get("actor") == "G3_Mole_Body_01" and rep.get("clips") == ["Mole_Stand_None_None_P0_Ambient_Loop_N_Fwd_01_%_00_P0_0"] and any("Dig" in s for s in rep.get("skipped", [])),
+              f"new creature: {rep.get('actor')}, clips {rep.get('clips')}, skipped {rep.get('skipped')}, notes {rep.get('notes')}")
+        # Back from the (fake) game: the bones, the mesh, the clip and the nod at its middle.
+        clear()
+        out, arm2, _ = import_actor.import_character("G3_Mole_Body_01", "", 1, "-")
+        bones2 = sorted(b.name for b in arm2.data.bones) if arm2 else []
+        mesh2 = next((o for o in bpy.data.objects if o.type == "MESH"), None)
+        check(arm2 is not None and {"Mole_ROOT", "Mole_Spine_Spine_1", "Mole_Head_Head_1", "Mole_Left_Arm_Arm_1", "Mole_Right_Arm_Arm_1"} <= set(bones2) and mesh2 is not None and len(mesh2.data.polygons) == 12,
+              f"creature back: bones {bones2}, faces {len(mesh2.data.polygons) if mesh2 else None}")
+        bpy.context.view_layer.objects.active = arm2
+        arm2.select_set(True)
+        r = bpy.ops.gothic3.import_motion(clip="Mole_Stand_None_None_P0_Ambient_Loop_N_Fwd_01_%_00_P0_0")
+        got = turn(arm2)
+        ang = got.rotation_difference(want).angle
+        f2 = arm2.animation_data.action.frame_range[:] if arm2.animation_data and arm2.animation_data.action else None
+        check(r == {"FINISHED"} and ang < 0.002 and want.angle > 0.6, f"creature clip back: the nod of {want.angle:.3f} rad comes back {ang:.5f} rad off (frames {f2})")
+    finally:
+        pr.game_dir = real_game
+        core.run = orig
+        shutil.rmtree(fake, ignore_errors=True)
 except Exception:
     traceback.print_exc()
     fails.append("exception")
