@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.0 — 2026-11-03
 - New materials take the game's material of their look, read from the Blender nodes: opaque, with a specular map,
   alpha test (with or without specular), see-through blend (Alpha straight from the image, or a game material with
   blend mode 2: glass, water, haze) and glow (an emission image: additive). Each template is the most common make among

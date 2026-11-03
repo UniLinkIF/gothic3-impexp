@@ -44,7 +44,7 @@
 ## Встановлення
 
 1. Blender 5.1 або новіший.
-2. *Edit → Preferences → Get Extensions → ⌄ → Install from Disk…* → `gothic3_impexp-0.9.10.zip`.
+2. *Edit → Preferences → Get Extensions → ⌄ → Install from Disk…* → `gothic3_impexp-0.10.0.zip`.
 3. У налаштуваннях аддона перевірте **Папка гри Gothic 3** (та, де лежить `Gothic3.exe`; шлях Steam уже
    підставлено).
 
