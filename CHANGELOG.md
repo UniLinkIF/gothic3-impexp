@@ -13,6 +13,9 @@
   animated head, as an action on its face bones only, with the line's voice in the Video Sequencer. Gothic 3's faces
   move by bones: each animated head has a clip of 15 poses (`<head>_LipSync`), each line a timeline of phones
   (`.xlip`, in the speech archive), and a phone shows its pose.
+- The unknown u32 at 32 of an actor is the size of the source it was compiled from: the FXA's length in every actor
+  compiled since August 2006 (the 66 that differ are all older). The actor export writes that, as before; now a test
+  holds it.
 - Motion export **as a new variant** of the clip's action: the next free variant number (the wolf's ambient loops
   01–05 → 06), named the way the game composes clip names. The report says what the game makes of a new name: a
   variant, words the game never composes, or a name it does not look up.
